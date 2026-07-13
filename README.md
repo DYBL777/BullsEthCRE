@@ -59,7 +59,6 @@ they hold together.
 
 Honest state of this version:
 
-- Written to compile under solc 0.8.24 with viaIR. Confirm the build in your own environment.
 - Over the EIP-170 runtime size limit (24,576 bytes). The size split, moving logic into libraries
   to get under the limit, is the outstanding deployment gate. See `KNOWN_ISSUES.md`.
 - Foundry tests are written but not yet run. The runtime layer is not proven. See `KNOWN_ISSUES.md`.
