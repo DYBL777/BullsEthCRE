@@ -14,7 +14,6 @@ early. The design goal throughout is that the prize economics stay solvent and p
 that nobody is left unable to recover what they are owed.
 Status
 Honest state of this version:
-Compiles clean (solc 0.8.24, viaIR, 0 errors).
 Over the EIP-170 runtime size limit (24,576 bytes). The size split, moving logic into libraries
 to get under the limit, is the outstanding deployment gate. See `KNOWN_ISSUES.md`.
 Foundry tests are written but not yet run. The runtime layer is not proven. See `KNOWN_ISSUES.md`.
