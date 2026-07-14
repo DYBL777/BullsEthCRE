@@ -4,7 +4,7 @@
 pragma solidity 0.8.24;
 
 /**
- * @title  BullsEthCRE v1.11a
+ * @title  BullsEthCRE v1.11b
  * @notice 30-draw ETH/USD prediction game. 72h draw cycle, 90-day season.
  *
  *         PRE-CRE-FORK HISTORY: the full provenance trail (NearestTheETH_Base_1Y v1.86
@@ -224,7 +224,11 @@ pragma solidity 0.8.24;
  *           self-heals at finalize. No behavioural change.
  *           NS-I-A (fresh INFO): the resetDrawCount floor guard in activateDormancy() annotated as
  *           provably defensive-only (the invariant guarantees _drawsPlayed >= resetDrawCount).
- *         BullsEthCRE v1.11a
+ *         BullsEthCRE v0.14 [relabeled in v1.11b: this block was mis-titled "v1.11a". Its content
+ *           (ceiling-division fix, permissionless VC claim, pre-CRE history move) is the v0.14
+ *           economics-arc-end pass, immediately BEFORE the CRE fork -- "next build is CRE v1.0"
+ *           below confirms it. The real v1.11a/v1.11b changes live in the per-version CHANGELOG
+ *           files, not the header, per the no-header-duplication decision from v1.11a onward.]
  *           B-L-01 (LOW): getRequiredCutoffDiffBounds() min values now use CEILING division to
  *           match submitCutoffDiffs()'s acceptance check (floor(count*10000/snapshot) >= MIN_BPS).
  *           The v1.54 floor-with-"if 0 then 1" patch fixed only the zero case; counts of 1 or 2
@@ -611,7 +615,6 @@ contract BullsEth is ReentrancyGuard, Ownable2Step {
     event DefaultPredictionUpdated(uint256 oldPrediction, uint256 newPrediction);
     // ── [CRE v0.1 / SmartEarn] VC earnout events ───────────────────────────────
     event PotSeeded(uint256 amount, address indexed seeder);
-    event VCBonusTierReached(uint256 indexed tier, uint256 threshold, uint256 bonusAmount, uint256 cumulativeTreasury);
     /// @dev [CRE v0.9 / NS-I-01] totalSeedReleased is PROVISIONAL. This event fires in
     ///      _calculatePrizePools() when the supplement is added to the weekly pool, but after
     ///      CR-L-01 the seedReleased state variable is not incremented until _finalizeWeekCore()
@@ -889,27 +892,24 @@ contract BullsEth is ReentrancyGuard, Ownable2Step {
     uint256 public immutable VC_SEED;
     /// @notice VC wallet receiving (VC_SEED - seedReleased) at closeGame / sweepDormancyRemainder.
     address public immutable VC_SEED_RETURN_ADDRESS;
-    /// @notice Tier 1 cumulative treasury threshold for performance bonus. 0 = disabled.
-    uint256 public immutable VC_BONUS_TIER1_THRESHOLD;
-    /// @notice Bonus paid when tier 1 hit. Tiers are EXCLUSIVE — highest applicable pays only.
-    uint256 public immutable VC_BONUS_TIER1_AMOUNT;
-    /// @notice Tier 2 threshold. Must be > VC_BONUS_TIER1_THRESHOLD.
-    uint256 public immutable VC_BONUS_TIER2_THRESHOLD;
-    /// @notice Bonus paid when tier 2 hit. Must be > VC_BONUS_TIER1_AMOUNT.
-    uint256 public immutable VC_BONUS_TIER2_AMOUNT;
-    /// @notice Hard cap on seedReleaseRatioBps governance (BPS; 0 = no cap). [Weather20 v2.42 pattern]
+    // [v1.11b] VC_BONUS_TIER1/2_THRESHOLD/AMOUNT immutables removed. The fixed-tier performance
+    //          bonus was dead via PG-01 (constructor rejected all tier params) and is superseded
+    //          by the spent-seed return model. See CHANGELOG v1.11b.
+    /// @notice Hard cap on seedReleaseRatioBps governance (BPS). 0 = no cap only when VC_SEED == 0;
+    ///         a seeded game requires this > 0 (constructor VC-SPENT-CAP guard). [Weather20 v2.42 pattern]
     uint256 public immutable MAX_SEED_RELEASE_RATIO_BPS;
-    /// @notice Per-draw seed release cap as BPS of VC_SEED (0 = no cap).
+    /// @notice Per-draw seed release cap as BPS of VC_SEED. 0 = no cap only when VC_SEED == 0;
+    ///         a seeded game requires this > 0 (constructor SEED-CAP guard).
     uint256 public immutable MAX_SEED_PER_DRAW_BPS;
 
     // ── State variables ───────────────────────────────────────────────────────
     address public ethFeed;
-    address public ethReserveFeed;
+    address public immutable ethReserveFeed; // [v1.11b] immutable; set in constructor
     int256  public lastValidPrice;
     int256  public resolvedPrice;
     // [v1.0] tier1Band/tier2Band/tier3Band/tier4Band REMOVED.
     // Dynamic cutoff diffs replace fixed BPS bands. See t1CutoffDiff et al.
-    address public wethFeed;
+    address public immutable wethFeed; // [v1.11b] immutable; set in constructor
     uint256 public autoDefaultCents;
     uint256 public defaultPrediction;
 
@@ -1196,10 +1196,7 @@ uint256 public dormancyParticipantCount;
     uint256 public pendingSeedReleaseRatioBps;
     uint256 public seedReleaseRatioEffectiveTime;
     uint256 public vcReturnOwed;               // set at closeGame / sweepDormancyRemainder
-    /// @notice [CRE v0.4 / SE-M-01] Pre-funded VC bonus. Moved from treasuryBalance to here
-    ///         the moment a tier threshold is crossed in buyTickets(). Owner cannot withdraw
-    ///         escrowed funds. Transferred to vcReturnOwed at closeGame / sweepDormancyRemainder.
-    uint256 public vcBonusEscrow;
+    // [v1.11b] vcBonusEscrow removed with the fixed-tier bonus mechanism. See CHANGELOG v1.11b.
     uint256 public currentDrawSeedSupplement;  // [CRE v0.9 / IC-L-01] this draw's seed supplement.
                                                // Set in _calculatePrizePools(); CONSUMED in
                                                // _finalizeWeekCore() where it is added to seedReleased
@@ -1244,37 +1241,32 @@ uint256 public dormancyParticipantCount;
     /// @notice Deploys BullsEth (pure USDC, no Aave dependency).
     /// @param _usdc                  USDC token address. Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
     /// @param _ethFeed               Chainlink ETH/USD feed (8 decimals). Base: 0x71041dddad3595F9CEd3dCCFBe3D1F4b0a16Bb70
+    /// @param _ethReserveFeed        [v1.11b] Immutable primary fallback ETH/USD feed (8 decimals).
+    ///                              address(0) disables this fallback. Validated at deploy.
+    /// @param _wethFeed              [v1.11b] Immutable secondary fallback WETH/USD feed (8 decimals).
+    ///                              address(0) disables this fallback. Validated at deploy.
     /// @param _defaultPrediction     Default prediction in USD cents for draw-1 auto-default.
     /// @param _sequencerFeed         L2 sequencer uptime feed. Base: 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433
     /// @param _protocolBeneficiary   Immutable recipient for all post-game unclaimed sweeps.
     /// @param _vcSeed                SmartEarn VC seed in USDC (6 decimals). 0 DISABLES the entire
-    ///                              SmartEarn/VC mechanism: no seed deposit, no bonus tiers, no VC
-    ///                              return path. When 0, all subsequent SmartEarn params are inert.
+    ///                              SmartEarn/VC mechanism: no seed deposit and no VC return path.
+    ///                              When 0, all subsequent SmartEarn params are inert.
     /// @param _vcSeedReturnAddress  Immutable wallet receiving (VC_SEED - seedReleased) at closeGame(),
     ///                              sweepDormancyRemainder(), or sweepFailedPregame(). Required non-zero
     ///                              when _vcSeed > 0. Must not be USDC or address(this) [L-04]. Set a
     ///                              multisig: no on-chain recovery or expiry exists if the key is lost.
-    /// @param _vcBonusTier1Threshold Cumulative season treasury (USDC) at which tier-1 SmartEarn bonus
-    ///                              unlocks. 0 (with tier-1 amount 0) disables tier 1. If active, must be
-    ///                              >= _vcBonusTier1Amount so earned treasury covers the escrow [SE-M-01].
-    /// @param _vcBonusTier1Amount   Tier-1 bonus (USDC) paid to the VC on crossing the tier-1 threshold.
-    ///                              If active, must be > 0 and (when _vcSeed > 0) <= _vcSeed.
-    /// @param _vcBonusTier2Threshold Cumulative season treasury at which tier-2 unlocks. Tier 2 requires
-    ///                              tier 1 active. Must be strictly greater than _vcBonusTier1Threshold,
-    ///                              and the incremental threshold must cover the incremental bonus delta
-    ///                              [SE-M-01]. Tiers are exclusive: only the highest crossed tier pays.
-    /// @param _vcBonusTier2Amount   Tier-2 bonus (USDC). Must exceed _vcBonusTier1Amount and (when
-    ///                              _vcSeed > 0) be <= _vcSeed.
-    /// @param _maxSeedReleaseRatioBps Per-season cap on cumulative seed release as BPS of VC_SEED
-    ///                              (0 = no cap). Must be <= 10000.
-    /// @param _maxSeedPerDrawBps    Per-draw cap on seed release as BPS of VC_SEED (0 = no cap).
-    ///                              Must be <= 10000.
+    // [v1.11b] The four _vcBonusTier* @param docs were removed with the fixed-tier bonus params.
+    /// @param _maxSeedReleaseRatioBps Per-season cap on cumulative seed release as BPS of VC_SEED.
+    ///                              Must be <= 10000. 0 = no cap ONLY when _vcSeed == 0; a seeded
+    ///                              game (_vcSeed > 0) MUST set this > 0 or the constructor reverts
+    ///                              (VC-SPENT-CAP guard below).
+    /// @param _maxSeedPerDrawBps    Per-draw cap on seed release as BPS of VC_SEED. Must be <= 10000.
+    ///                              0 = no cap ONLY when _vcSeed == 0; a seeded game (_vcSeed > 0)
+    ///                              MUST set this > 0 or the constructor reverts (SEED-CAP guard below).
     constructor(
-        address _usdc, address _ethFeed,
+        address _usdc, address _ethFeed, address _ethReserveFeed, address _wethFeed,
         uint256 _defaultPrediction, address _sequencerFeed, address _protocolBeneficiary,
         uint256 _vcSeed, address _vcSeedReturnAddress,
-        uint256 _vcBonusTier1Threshold, uint256 _vcBonusTier1Amount,
-        uint256 _vcBonusTier2Threshold, uint256 _vcBonusTier2Amount,
         uint256 _maxSeedReleaseRatioBps, uint256 _maxSeedPerDrawBps
     ) Ownable2Step() {
         if (_usdc == address(0)) revert InvalidAddress();
@@ -1293,6 +1285,23 @@ uint256 public dormancyParticipantCount;
         defaultPrediction = _defaultPrediction;
         USDC = _usdc;
         SEQUENCER_FEED = _sequencerFeed;
+        // [v1.11b] Fallback feeds are now immutable, validated here (validation moved out of the
+        //          deleted setReserveFeed/setWethFeed). address(0) permitted = fallback disabled.
+        if (_ethReserveFeed != address(0)) {
+            if (_ethReserveFeed == _usdc || _ethReserveFeed == address(this)) revert InvalidAddress();
+            if (_ethReserveFeed == _sequencerFeed && _sequencerFeed != address(0)) revert InvalidAddress();
+            if (_ethReserveFeed == _ethFeed) revert FeedUnchanged();
+            try AggregatorV3Interface(_ethReserveFeed).decimals() returns (uint8 dec) { if (dec != 8) revert FeedDecimalsMismatch(); } catch { revert FeedDecimalsMismatch(); }
+        }
+        if (_wethFeed != address(0)) {
+            if (_wethFeed == _usdc || _wethFeed == address(this)) revert InvalidAddress();
+            if (_wethFeed == _sequencerFeed && _sequencerFeed != address(0)) revert InvalidAddress();
+            if (_wethFeed == _ethFeed) revert FeedUnchanged();
+            if (_wethFeed == _ethReserveFeed) revert FeedUnchanged();
+            try AggregatorV3Interface(_wethFeed).decimals() returns (uint8 dec) { if (dec != 8) revert FeedDecimalsMismatch(); } catch { revert FeedDecimalsMismatch(); }
+        }
+        ethReserveFeed = _ethReserveFeed;
+        wethFeed = _wethFeed;
         DEPLOY_TIMESTAMP = block.timestamp;
         gamePhase = GamePhase.PREGAME;
         drawPhase = DrawPhase.IDLE;
@@ -1309,36 +1318,12 @@ uint256 public dormancyParticipantCount;
             // into the contract, stranding it with no recovery path.
             if (_vcSeedReturnAddress == address(this)) revert InvalidAddress();
         }
-        bool _tier1Active = (_vcBonusTier1Threshold > 0 || _vcBonusTier1Amount > 0);
-        bool _tier2Active = (_vcBonusTier2Threshold > 0 || _vcBonusTier2Amount > 0);
-        if (_tier1Active) {
-            if (_vcBonusTier1Threshold == 0) revert BelowMinimum();
-            if (_vcBonusTier1Amount    == 0) revert BelowMinimum();
-            if (_vcSeed > 0 && _vcBonusTier1Amount > _vcSeed) revert ExceedsLimit();
-            // [CRE v0.4 / SE-M-01] Threshold must be >= bonus. If treasury hasn't been drained,
-            // hitting the threshold means enough treasury was earned to cover the escrow.
-            if (_vcBonusTier1Threshold < _vcBonusTier1Amount) revert BelowMinimum();
-        }
-        if (_tier2Active) {
-            if (!_tier1Active)                                       revert BelowMinimum();
-            if (_vcBonusTier2Threshold <= _vcBonusTier1Threshold)   revert BelowMinimum();
-            if (_vcBonusTier2Amount    <= _vcBonusTier1Amount)      revert BelowMinimum();
-            if (_vcSeed > 0 && _vcBonusTier2Amount > _vcSeed)      revert ExceedsLimit();
-            // [CRE v0.4 / SE-M-01] Incremental threshold must cover incremental bonus delta.
-            // Closes the cross-tier gap: treasury earned between tier1 and tier2 must be
-            // enough to fund the additional escrow.
-            if ((_vcBonusTier2Threshold - _vcBonusTier1Threshold) < (_vcBonusTier2Amount - _vcBonusTier1Amount))
-                revert BelowMinimum();
-        }
+        // [v1.11b] Fixed-tier bonus validation removed with the mechanism. The old tier params
+        //          (rejected unconditionally by PG-01 since v1.11a) no longer exist.
         if (_maxSeedReleaseRatioBps > 10000) revert ExceedsLimit();
         if (_maxSeedPerDrawBps > 10000)      revert ExceedsLimit();
-        // [CRE v1.11a / PG-01 fix] FAIL-CLOSED. The old fixed-tier bonus is superseded by the
-        // spent-seed return model and is dead in every valid config: forbidden when seeded (it
-        // would double-pay the VC), and when unseeded it could fire vcBonusEscrow to an
-        // unvalidated VC_SEED_RETURN_ADDRESS (possibly address(0)). So tier params are now
-        // rejected UNCONDITIONALLY. Full removal of the tier mechanism (params + crossing logic
-        // at line ~2157 + vcBonusEscrow references) is a tracked follow-up (KNOWN_ISSUES).
-        if (_tier1Active || _tier2Active) revert ExceedsLimit();
+        // [v1.11b] PG-01 unconditional tier reject removed: the tier params it guarded no longer
+        //          exist. The mechanism it protected against is fully removed. See CHANGELOG v1.11b.
         // [CRE v1.01 / SEED-CAP] A seeded game MUST set a per-draw release cap. BullsEth's
         // inline seed release has no ceiling ratchet, so maxSeedPerDrawBps is the only
         // bound on per-draw release velocity. Deploying a seeded game with cap 0 would
@@ -1360,10 +1345,6 @@ uint256 public dormancyParticipantCount;
         }
         VC_SEED                    = _vcSeed;
         VC_SEED_RETURN_ADDRESS     = _vcSeedReturnAddress;
-        VC_BONUS_TIER1_THRESHOLD   = _vcBonusTier1Threshold;
-        VC_BONUS_TIER1_AMOUNT      = _vcBonusTier1Amount;
-        VC_BONUS_TIER2_THRESHOLD   = _vcBonusTier2Threshold;
-        VC_BONUS_TIER2_AMOUNT      = _vcBonusTier2Amount;
         MAX_SEED_RELEASE_RATIO_BPS = _maxSeedReleaseRatioBps;
         MAX_SEED_PER_DRAW_BPS      = _maxSeedPerDrawBps;
     }
@@ -1747,35 +1728,10 @@ uint256 public dormancyParticipantCount;
     }
 
 
-    /// @notice Sets the reserve ETH/USD price feed used as primary fallback. Owner only.
-    /// @param _reserveFeed  New reserve feed address. address(0) clears the fallback.
-    function setReserveFeed(address _reserveFeed) external onlyOwner {
-        // FeedSubstituted reused for admin feed management -- semantically distinct from startGame() usage.
-        if (_reserveFeed == address(0)) { address old = ethReserveFeed; ethReserveFeed = address(0); emit FeedSubstituted(old, address(0)); return; }
-        if (_reserveFeed == USDC || _reserveFeed == address(this)) revert InvalidAddress();
-        if (_reserveFeed == SEQUENCER_FEED && SEQUENCER_FEED != address(0)) revert InvalidAddress();
-        if (_reserveFeed == ethFeed) revert FeedUnchanged();
-        if (_reserveFeed == wethFeed) revert FeedUnchanged();
-        try AggregatorV3Interface(_reserveFeed).decimals() returns (uint8 dec) { if (dec != 8) revert FeedDecimalsMismatch(); } catch { revert FeedDecimalsMismatch(); }
-        address oldReserve = ethReserveFeed;
-        ethReserveFeed = _reserveFeed;
-        emit FeedSubstituted(oldReserve, _reserveFeed);
-    }
-
-    /// @notice Sets the WETH/USD price feed used as secondary fallback. Owner only.
-    /// @param _wethFeed  New WETH feed address. address(0) clears the fallback.
-    function setWethFeed(address _wethFeed) external onlyOwner {
-        // FeedSubstituted reused for admin feed management -- semantically distinct from startGame() usage.
-        if (_wethFeed == address(0)) { address old = wethFeed; wethFeed = address(0); emit FeedSubstituted(old, address(0)); return; }
-        if (_wethFeed == USDC || _wethFeed == address(this)) revert InvalidAddress();
-        if (_wethFeed == SEQUENCER_FEED && SEQUENCER_FEED != address(0)) revert InvalidAddress();
-        if (_wethFeed == ethFeed) revert FeedUnchanged();
-        if (_wethFeed == ethReserveFeed) revert FeedUnchanged();
-        try AggregatorV3Interface(_wethFeed).decimals() returns (uint8 dec) { if (dec != 8) revert FeedDecimalsMismatch(); } catch { revert FeedDecimalsMismatch(); }
-        address oldWeth = wethFeed;
-        wethFeed = _wethFeed;
-        emit FeedSubstituted(oldWeth, _wethFeed);
-    }
+    // [v1.11b] setReserveFeed() and setWethFeed() removed. ethReserveFeed and wethFeed are now
+    //          immutable, set once in the constructor. The FeedSubstituted event is retained (still
+    //          emitted by the startGame primary-fail repoint). The primary feed (ethFeed) stays
+    //          mutable with its full proposeFeedChange/executeFeedChange timelock path intact.
 
     /// @notice Sets the global auto-default prediction value. Owner only.
     /// @param _prediction  Default prediction in USD cents. Used when autoDefaultCents == 0.
@@ -2145,28 +2101,10 @@ uint256 public dormancyParticipantCount;
             uint256 tSlice = transferAmount * TREASURY_BPS / 10000;
             treasuryBalance += tSlice; prizePot += transferAmount - tSlice; p.totalPaid += transferAmount;
             emit TreasuryAccrual(currentDraw, tSlice, TREASURY_BPS);
-            // [CRE v0.1 / SmartEarn] Track season treasury and emit live tier-crossing events.
-            // [CRE v0.4 / SE-M-01] At crossing: move bonus from treasuryBalance to vcBonusEscrow immediately.
-            // Escrow is a separate allocation — owner cannot withdraw it via withdrawTreasury().
-            // Tier 2 moves only the delta above tier 1 (exclusive tiers, highest wins).
-            uint256 _prevCT = cumulativeSeasonTreasury;
+            // [CRE v0.1 / SmartEarn] Track season treasury. Feeds SEED_RELEASE_THRESHOLD and the
+            // spent-seed return model. [v1.11b] The fixed-tier bonus crossing/escrow logic that
+            // formerly lived here was removed; cumulativeSeasonTreasury tracking stays.
             cumulativeSeasonTreasury += tSlice;
-            if (VC_BONUS_TIER1_THRESHOLD > 0
-                    && _prevCT < VC_BONUS_TIER1_THRESHOLD
-                    && cumulativeSeasonTreasury >= VC_BONUS_TIER1_THRESHOLD) {
-                uint256 _t1Escrow = VC_BONUS_TIER1_AMOUNT <= treasuryBalance ? VC_BONUS_TIER1_AMOUNT : treasuryBalance;
-                if (_t1Escrow > 0) { treasuryBalance -= _t1Escrow; vcBonusEscrow += _t1Escrow; }
-                emit VCBonusTierReached(1, VC_BONUS_TIER1_THRESHOLD, VC_BONUS_TIER1_AMOUNT, cumulativeSeasonTreasury);
-            }
-            if (VC_BONUS_TIER2_THRESHOLD > 0
-                    && _prevCT < VC_BONUS_TIER2_THRESHOLD
-                    && cumulativeSeasonTreasury >= VC_BONUS_TIER2_THRESHOLD) {
-                // Delta: tier2 total minus what tier1 already escrowed.
-                uint256 _t2Delta = VC_BONUS_TIER2_AMOUNT > vcBonusEscrow ? VC_BONUS_TIER2_AMOUNT - vcBonusEscrow : 0;
-                uint256 _t2Escrow = _t2Delta <= treasuryBalance ? _t2Delta : treasuryBalance;
-                if (_t2Escrow > 0) { treasuryBalance -= _t2Escrow; vcBonusEscrow += _t2Escrow; }
-                emit VCBonusTierReached(2, VC_BONUS_TIER2_THRESHOLD, VC_BONUS_TIER2_AMOUNT, cumulativeSeasonTreasury);
-            }
             currentDrawTicketTotal += transferAmount;
             currentDrawNetTicketTotal += transferAmount - tSlice;
         }
@@ -2967,12 +2905,10 @@ uint256 public dormancyParticipantCount;
                 uint256 _fromTreasury = _shortfall <= treasuryBalance ? _shortfall : treasuryBalance;
                 if (_fromTreasury > 0) { treasuryBalance -= _fromTreasury; vcReturnOwed += _fromTreasury; }
             }
-            // [CRE v0.4 / SE-M-01] Escrow already moved from treasury at tier crossing.
-            // Transfer directly to vcReturnOwed. No treasury deduction needed here.
             // SE-I-04 note: the _fromSurplus/_fromTreasury split above is cosmetic —
             // surplusToTreasury was folded into treasuryBalance before this block,
             // so both branches decrement treasuryBalance. Kept for audit trail continuity.
-            if (vcBonusEscrow > 0) { vcReturnOwed += vcBonusEscrow; vcBonusEscrow = 0; }
+            // [v1.11b] vcBonusEscrow transfer removed with the fixed-tier bonus mechanism.
             // [CRE v1.06 / VC-SPENT-RETURN] Pay the spent-seed obligation (reconstituted principal
             // + 25% return + big-season bonus) from treasury. This is the TRUE amount (no buffer);
             // the withdraw lock's 5% buffer was protocol money and stays in treasury. The
@@ -3090,9 +3026,9 @@ uint256 public dormancyParticipantCount;
             // SYNC: subset of getSolvencyStatus -- draw30BonusFund/tierPools/prizePot zero in CLOSED.
             // Reset/commit pools may be non-zero if reset fired before draw 30.
             // [CRE v0.3 / SYNC] vcReturnOwed and dormancyVCPool added — nonzero in CLOSED if SmartEarn active.
-            // [CRE v0.4] vcBonusEscrow added.
+            // [v1.11b] vcBonusEscrow term removed with the fixed-tier bonus mechanism.
             uint256 _allocated = endgameOwed + totalUnclaimedPrizes + treasuryBalance
-                + vcReturnOwed + dormancyVCPool + vcBonusEscrow
+                + vcReturnOwed + dormancyVCPool
                 + resetDrawRefundPool + resetDrawRefundPool2
                 + commitmentRefundPool + totalForceDeclineRefundOwed;
             if (_balance + SOLVENCY_TOLERANCE < _allocated) {
@@ -3468,7 +3404,7 @@ uint256 public dormancyParticipantCount;
         { uint256 _bal = IERC20(USDC).balanceOf(address(this));
           uint256 _alloc = dormancyOGPool + dormancyCasualRefundPool
               + dormancyCommitmentPool + dormancyPerHeadPool
-              + dormancyVCPool + vcReturnOwed + vcBonusEscrow              // [CRE v0.3/v0.4 / SYNC]
+              + dormancyVCPool + vcReturnOwed                              // [CRE v0.3 / SYNC]; [v1.11b] escrow removed
               + treasuryBalance + endgameOwed + totalUnclaimedPrizes
               + resetDrawRefundPool + resetDrawRefundPool2
               + commitmentRefundPool + totalForceDeclineRefundOwed;
@@ -3510,8 +3446,7 @@ uint256 public dormancyParticipantCount;
                 vcReturnOwed   = dormancyVCPool + _fromTreasury;
                 dormancyVCPool = 0; dormancyVCPoolSnapshot = 0; dormancyVCFullCover = false;
             }
-            // [CRE v0.4 / SE-M-01] Escrow already moved from treasury at tier crossing.
-            if (vcBonusEscrow > 0) { vcReturnOwed += vcBonusEscrow; vcBonusEscrow = 0; }
+            // [v1.11b] vcBonusEscrow transfer removed with the fixed-tier bonus mechanism.
             // [CRE v1.07 / VC-SPENT-RETURN] Pay the spent-seed obligation (reconstituted principal
             // + 25% return + big-season bonus) on EARLY SHUTDOWN too, not just a completed season.
             // The withdraw lock reserved this in treasury throughout the season, so the money is
@@ -3823,7 +3758,7 @@ uint256 public dormancyParticipantCount;
           for (uint256 i = 0; i < 3; i++) _tierTotal += tierPools[i];
           uint256 _a = prizePot + totalUnclaimedPrizes + treasuryBalance + endgameOwed
               + dormancyOGPool + dormancyCasualRefundPool + dormancyCommitmentPool
-              + dormancyPerHeadPool + dormancyVCPool + vcReturnOwed + vcBonusEscrow  // [CRE v0.3/v0.4 / SYNC]
+              + dormancyPerHeadPool + dormancyVCPool + vcReturnOwed  // [CRE v0.3 / SYNC]; [v1.11b] escrow removed
               + _tierTotal + currentDrawSeedReturn
               + resetDrawRefundPool + resetDrawRefundPool2 + commitmentRefundPool
               + totalForceDeclineRefundOwed + draw30BonusFund;
@@ -3885,24 +3820,9 @@ uint256 public dormancyParticipantCount;
         // (not yet set by startGame()), so the pot<floor gate never fires. Two refund backstops
         // (claimSignupRefund, cancelOGRegistration) rely on treasuryBalance during PREGAME.
         if (gamePhase == GamePhase.PREGAME) revert TreasuryLocked();
-        // [CRE v0.4 / SE-M-01] Protect the next tier's bonus that is not yet escrowed.
-        // Once a tier crosses, the bonus is in vcBonusEscrow (not in treasuryBalance), so no
-        // protection needed for already-crossed tiers. This guards the NEXT tier's obligation.
-        // SE-L-01 note: cumulativeSeasonTreasury counts only active-draw ticket revenue (not
-        // pregame slices), so it may be slightly lower than the denominator used by the VC
-        // to evaluate tier proximity. Document in deployment terms.
+        // [v1.11b] Fixed-tier bonus protection block removed with the mechanism. The
+        //          if(!gameSettled) wrapper and the VC-SPENT reserve below are unaffected.
         if (!gameSettled) {
-            uint256 _nextBonus = 0;
-            if (VC_BONUS_TIER1_THRESHOLD > 0 && cumulativeSeasonTreasury < VC_BONUS_TIER1_THRESHOLD) {
-                _nextBonus = VC_BONUS_TIER1_AMOUNT; // tier 1 not yet crossed — protect its full amount
-            } else if (VC_BONUS_TIER2_THRESHOLD > 0 && cumulativeSeasonTreasury < VC_BONUS_TIER2_THRESHOLD) {
-                _nextBonus = VC_BONUS_TIER2_AMOUNT > VC_BONUS_TIER1_AMOUNT
-                    ? VC_BONUS_TIER2_AMOUNT - VC_BONUS_TIER1_AMOUNT : 0; // protect the delta only
-            }
-            if (_nextBonus > 0) {
-                uint256 _remaining = treasuryBalance - amount;
-                if (_remaining < _nextBonus) revert TreasuryBonusProtected(_nextBonus, _remaining);
-            }
             // [CRE v1.06 / VC-SPENT-RETURN] Reserve the spent-seed obligation (principal
             // reconstitution + 25% return + big-season bonus) plus the 5% lock buffer. Treasury
             // may not be drained below this while the game runs, so the VC's spent seed and its
@@ -4389,9 +4309,8 @@ uint256 public dormancyParticipantCount;
     /// @return totalAllocated  Sum of all tracked allocations (prizePot + treasury +
     ///                         unclaimed prizes + dormancy pools + tier pools + seed +
     ///                         reset refund pools + endgameOwed + draw30BonusFund +
-    ///                         dormancyVCPool + vcReturnOwed + vcBonusEscrow). [CRE v0.9 / NS-L-03:
-    ///                         the three VC/SmartEarn pools were always in the maths but omitted
-    ///                         from this list.]
+    ///                         dormancyVCPool + vcReturnOwed). [v1.11b: vcBonusEscrow removed with
+    ///                         the fixed-tier bonus; the two remaining VC pools stay in the maths.]
     /// @return isSolvent       True if totalValue + SOLVENCY_TOLERANCE >= totalAllocated.
     ///                         SOLVENCY_TOLERANCE (100_000 = $0.10) absorbs USDC rounding
     ///                         dust. isSolvent=false indicates a genuine shortfall.
@@ -4667,7 +4586,7 @@ uint256 public dormancyParticipantCount;
     /// @notice Returns the contract version string.
     /// @return  Version string identifying this deployment.
     function getContractVersion() external pure returns (string memory) {
-        return "BullsEthCRE_v1.11a";
+        return "BullsEthCRE_v1.11b";
     }
 
     /// @notice Returns current draw-30 bonus fund balance and expected contribution per draw.
@@ -5302,7 +5221,7 @@ uint256 public dormancyParticipantCount;
             + tierPoolsTotal + currentDrawSeedReturn
             + resetDrawRefundPool + resetDrawRefundPool2 + commitmentRefundPool + totalForceDeclineRefundOwed
             + draw30BonusFund
-            + dormancyVCPool + vcReturnOwed + vcBonusEscrow; // [CRE v0.1] SmartEarn; [CRE v0.4] escrow added
+            + dormancyVCPool + vcReturnOwed; // [CRE v0.1] SmartEarn; [v1.11b] escrow removed
     }
 
     /// @dev [v1.52] Operational profile change from Aave variant.
@@ -5591,20 +5510,8 @@ uint256 public dormancyParticipantCount;
     }
 
     // ── [CRE v0.1 / SmartEarn] Internal + view helpers ──────────────────────────
-
-    /// @dev Returns the VC performance bonus currently owed based on cumulativeSeasonTreasury.
-    ///      Tiers are EXCLUSIVE: highest applicable pays only. Returns 0 if none hit.
-    ///      [CRE v0.4] No longer called by closeGame() or sweepDormancyRemainder() — escrow handles
-    ///      payment there. [CRE v0.9 / NS-L-02] withdrawTreasury() no longer calls this either; its
-    ///      bonus-protection floor reads vcBonusEscrow and the tier thresholds directly. The ONLY
-    ///      remaining caller is getVCBonusStatus() (view).
-    function _vcBonusAmount() internal view returns (uint256) {
-        if (VC_BONUS_TIER2_THRESHOLD > 0 && cumulativeSeasonTreasury >= VC_BONUS_TIER2_THRESHOLD)
-            return VC_BONUS_TIER2_AMOUNT;
-        if (VC_BONUS_TIER1_THRESHOLD > 0 && cumulativeSeasonTreasury >= VC_BONUS_TIER1_THRESHOLD)
-            return VC_BONUS_TIER1_AMOUNT;
-        return 0;
-    }
+    // [v1.11b] _vcBonusAmount() removed with the fixed-tier bonus mechanism (its only caller was
+    //          getVCBonusStatus(), also removed).
 
     /// @notice Returns current seed release state for off-chain monitoring.
     /// @dev    [CRE v0.11 / NS-L-01] Return tags added (was untagged multi-value view).
@@ -5642,43 +5549,8 @@ uint256 public dormancyParticipantCount;
         );
     }
 
-    /// @notice Returns SmartEarn bonus status for monitoring.
-    /// @dev    [CRE v0.10 / NS-I-01] currentBonus is the NOMINAL tier figure (what the current
-    ///         cumulativeSeasonTreasury tier implies). It is NOT the funded/committed amount. Post
-    ///         SE-M-01, the funded truth is vcBonusEscrow: bonus is moved treasury->escrow at the
-    ///         tier crossing inside buyTickets(), and that escrowed value is what the VC is actually
-    ///         paid. Monitoring integrators tracking what the VC will receive should read vcBonusEscrow
-    ///         (via getSolvencyStatus or direct), not currentBonus here.
-    /// @dev    [CRE v0.11 / NS-L-01] Return tags added (was untagged multi-value view).
-    /// @return enabled         True if tier 1 is configured (VC_BONUS_TIER1_THRESHOLD > 0).
-    /// @return currentBonus    NOMINAL bonus for the current tier (see @dev; NOT the funded escrow).
-    /// @return nextTier        Next uncrossed tier index (1 or 2); 0 if all tiers crossed or disabled.
-    /// @return nextThreshold   cumulativeSeasonTreasury needed to reach nextTier; 0 if none.
-    /// @return nextBonusAmount Nominal bonus at nextTier; 0 if none.
-    /// @return treasuryToNext  Remaining cumulativeSeasonTreasury to nextTier; 0 if none.
-    function getVCBonusStatus() external view returns (
-        bool    enabled,
-        uint256 currentBonus,
-        uint256 nextTier,
-        uint256 nextThreshold,
-        uint256 nextBonusAmount,
-        uint256 treasuryToNext
-    ) {
-        enabled = (VC_BONUS_TIER1_THRESHOLD > 0);
-        // [CRE v0.14 / NS-I-02] Gate first: return before computing _vcBonusAmount() when disabled,
-        // matching the gate-first house style elsewhere. Avoids wasted work in the disabled-config view.
-        if (!enabled) return (false, 0, 0, 0, 0, 0);
-        currentBonus = _vcBonusAmount();
-        if (VC_BONUS_TIER1_THRESHOLD > 0 && cumulativeSeasonTreasury < VC_BONUS_TIER1_THRESHOLD) {
-            return (true, currentBonus, 1, VC_BONUS_TIER1_THRESHOLD, VC_BONUS_TIER1_AMOUNT,
-                VC_BONUS_TIER1_THRESHOLD - cumulativeSeasonTreasury);
-        }
-        if (VC_BONUS_TIER2_THRESHOLD > 0 && cumulativeSeasonTreasury < VC_BONUS_TIER2_THRESHOLD) {
-            return (true, currentBonus, 2, VC_BONUS_TIER2_THRESHOLD, VC_BONUS_TIER2_AMOUNT,
-                VC_BONUS_TIER2_THRESHOLD - cumulativeSeasonTreasury);
-        }
-        return (true, currentBonus, 0, 0, 0, 0);
-    }
+    // [v1.11b] getVCBonusStatus() removed with the fixed-tier bonus mechanism. Monitoring of the
+    //          live VC economics is via getSeedReleaseStatus() and getSolvencyStatus().
 
     /// @dev [v1.52] Simplified -- direct USDC transfer only. No Aave withdrawal path.
     function _withdrawAndTransfer(address recipient, uint256 amount) internal {
