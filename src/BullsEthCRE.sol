@@ -4,7 +4,7 @@
 pragma solidity 0.8.24;
 
 /**
- * @title  BullsEthCRE v1.11b
+ * @title  BullsEthCRE v1.17
  * @notice 30-draw ETH/USD prediction game. 72h draw cycle, 90-day season.
  *
  *         CHANGELOG: the full version history (CRE fork, v0.1 onward) lives in
@@ -15,6 +15,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
+import "./IBullsEthCRE.sol";
 // Aave removed in v1.52. Pure USDC contract.
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
@@ -23,325 +24,122 @@ interface AggregatorMinMax {
     function maxAnswer() external view returns (int192);
 }
 
-contract BullsEth is ReentrancyGuard, Ownable2Step {
+contract BullsEth is IBullsEthCRE, ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // ── Errors ───────────────────────────────────────────────────────────────
-    error GameNotActive();
-    error GameNotClosed();
-    error DrawInProgress();
-    error NotEnoughPlayers();
-    error MaxPlayersReached();
-    error OwnableUnauthorizedAccount(address account);
-    error AlreadyRegistered();
-    error NotRegistered();
-    error AlreadyOG();
-    error OGCapReached();
-    error NotOG();
-    error NotEligible();
-    error PicksLocked();
-    error AlreadyBoughtThisWeek();
-    error InvalidPrediction();
-    error InvalidAddress();
-    error FeedUnchanged();
-    error InsufficientBalance();
-    error TreasuryLocked();
-    error NothingToClaim();
-    error InsufficientGasForBatch();
-    error ResetRefundNotEligible();
-    error ResetRefundExpired();
-    error AlreadyClaimed();
-    error WrongPhase();
-    error TooEarly();
-    error CooldownActive();
-    error ExceedsLimit();
-    error BelowMinimum();
-    error CanOnlyDecrease();
-    error NotStuck();
-    error DrawNotProgressing();
-    /// @dev [v1.57+] Declared but never used as revert. Retained for ABI compatibility.
-    ///      Originally intended for malformed performData in performUpkeep().
-    ///      Actual decode failure throws a generic EVM ABI error instead. See performUpkeep().
-    error MalformedPerformData();
-    error SolvencyCheckFailed();
-    error TimelockPending();
-    error NoTimelockPending();
-    error GameAlreadyClosed();
-    error SignupNotFailed();
-    error PregameWindowExpired();
-    error AlreadyRefunded();
-    error MinimumTicketsRequired();
-    error GameNotDormant();
-    error AlreadyCommitted();
-    error DormancyWindowExpired();
-    error NotQualifiedForEndgame();
-    error NotEnoughValidPrices();
-    error SequencerNotReady();
-    error PotBelowTrajectory();
-    error BreathUnchanged();
-    error RenounceOwnershipDisabled();
-    error OwnershipTransferExpired();
-    /// @dev [CRE v0.1 / SmartEarn] withdrawTreasury() revert when amount would leave treasury
-    ///      below the currently triggered VC performance bonus obligation.
-    error TreasuryBonusProtected(uint256 required, uint256 available);
-    error SeedNotDeposited(); // [CRE v0.4 / SE-H-01] startGame() fired without VC seed deposited
-    /// @dev [CRE v0.1] seedPot() revert if called more than once.
-    error PotAlreadySeeded();
-    error IntentQueueFull(); // [v1.57-P1] never fired -- intent queue removed
-    error AlreadyInIntentQueue(); // [v1.57-P1] kept for ABI compat
-    error NoIntentPending(); // [v1.57-P1] never fired -- intent queue removed
-    error IntentWindowExpired(); // [v1.57-P1] never fired -- intent queue removed
-    error IntentQueueNotEmpty(); // kept for ABI compat, no longer fired
-    /// @dev [v1.57-P1] Reverts cancelOGRegistration() when 72h window has passed.
-    error DeclineWindowExpired();
-    /// @dev [v1.57-P1] Reverts cancelOGRegistration() when caller has no open window.
-    error NotInDeclineWindow();
-    error ActiveDeclineWindowOpen(); // [v1.57-P1] never fired -- retained for ABI compat
-    error PregameOGNetNotSet(); // [v1.57] never fired -- guard removed
-    error FeedDecimalsMismatch();
-    error UnknownAction(uint8 action);
+    // @dev [v1.57+] Declared but never used as revert. Retained for ABI compatibility.
+    //      Originally intended for malformed performData in performUpkeep().
+    //      Actual decode failure throws a generic EVM ABI error instead. See performUpkeep().
+    // @dev [CRE v0.1 / SmartEarn] withdrawTreasury() revert when amount would leave treasury
+    //      below the currently triggered VC performance bonus obligation.
+    // @dev [CRE v0.1] seedPot() revert if called more than once.
+    // @dev [v1.57-P1] Reverts cancelOGRegistration() when 72h window has passed.
+    // @dev [v1.57-P1] Reverts cancelOGRegistration() when caller has no open window.
     // [v1.0] No InvalidTierConfiguration -- no TIER_BPS constants in this fork.
-    /// @dev [v1.0] Submitted cutoff counts outside acceptable range.
-    ///      t1Count: 0.5%-4% of snapshotTotalEntries.
-    ///      t2Count: 4%-12% of snapshotTotalEntries.
-    ///      t3Count: 10%-50% of snapshotTotalEntries.
-    ///      [v2.18] Lower bound recalibrated from 16% to 10% (new cumulative T3 target 12-15%).
-    ///      Upper bound unchanged at 50% (same 2-ticket casual snapshot bias applies).
-    error CutoffOutOfRange();
-    /// @dev [v1.0] t1CutoffDiff > t2CutoffDiff or t2CutoffDiff > t3CutoffDiff or t1Count > t3Count.
-    error InvalidCutoffOrder();
+    // @dev [v1.0] Submitted cutoff counts outside acceptable range.
+    //      t1Count: 0.5%-4% of snapshotTotalEntries.
+    //      t2Count: 4%-12% of snapshotTotalEntries.
+    //      t3Count: 10%-50% of snapshotTotalEntries.
+    //      [v2.18] Lower bound recalibrated from 16% to 10% (new cumulative T3 target 12-15%).
+    //      Upper bound unchanged at 50% (same 2-ticket casual snapshot bias applies).
+    // @dev [v1.0] t1CutoffDiff > t2CutoffDiff or t2CutoffDiff > t3CutoffDiff or t1Count > t3Count.
 
     // ── Events ───────────────────────────────────────────────────────────────
-    event StaleOGsPruned(uint256 pruned, uint256 remaining);
-    event PlayerRegistered(address indexed player, uint256 totalPlayers);
-    event CommitmentPaid(address indexed player, uint256 amount);
-    event CommitmentDoublePaid(address indexed player, uint256 amount);
-    event CommitmentDoubleUnused(address indexed player, uint256 amount);
-    event CommitmentCreditExpired(address indexed player, uint256 creditAmount);
-    event UpfrontOGRegistered(address indexed player, uint256 prediction, uint256 prediction2, uint256 ogCount);
-    event WeeklyOGRegistered(address indexed player, uint256 prediction, uint256 prediction2, uint256 draw);
-    event WeeklyOGStatusLost(address indexed player, uint256 atDraw);
-    event TicketsBought(address indexed player, uint256 draw, uint256 ticketCount);
-    event TierSkippedDust(uint256 indexed tier, uint256 amount);
-    event PredictionSubmitted(address indexed player, uint256 prediction, uint256 draw);
-    event Prediction2Submitted(address indexed player, uint256 prediction2, uint256 draw);
-    /// @dev Emitted in three places post-v2.34: (1) OG matching in _processMatchesCore()
-    ///      when OG prediction2 is stale/zero; (2) casual matching in _processMatchesCore()
-    ///      for lastTicketCount>=2 players when prediction2 stale/zero (added v2.34 M-01);
-    ///      (3) _applyAutoPredictions(). NOT OG-exclusive post v2.34 M-01. [v2.35 NS-I-03]
-    ///      Subgraphs inferring OG status from this event must be updated.
-    event AutoPrediction2Applied(address indexed player, uint256 indexed draw, uint256 prediction2);
-    event GameStarted(uint256 timestamp, uint256 totalPlayers);
-    event StartGameProposed(uint256 launchNotBefore);
-    event StartGameProposalCancelled();
-    event FeedSubstituted(address indexed oldFeed, address indexed newFeed);
-    event SignupRefund(address indexed player, uint256 amount, uint256 fullAmount);
-    event DrawResolved(uint256 indexed draw, int256 resolvedPrice);
-    event AutoPredictionApplied(address indexed player, uint256 indexed draw, uint256 prediction);
-    event AutomationForwarderSet(address indexed forwarder);
-    /// @notice [CRE v1.0] Emitted when the CRE forwarder address is set or cleared.
-    event CreForwarderSet(address indexed forwarder);
-    /// @notice [CRE v1.0] Emitted after every successfully processed CRE report.
-    event CreReportProcessed(uint8 indexed action, uint256 indexed draw);
-    event SignupRefundSkipped(address indexed player);
-    event MatchingComplete(uint256 indexed draw, uint256 totalWinners);
-    /// @notice Emitted when post-match winner counts fall outside expected BPS bounds. [v1.2]
-    ///         Winner arrays cleared; drawPhase reverts to CUTOFF_SUBMISSION for resubmission.
-    ///         Tier pools preserved for the corrected pass. OG status losses from the failed
-    ///         pass are NOT reversed. Fastest recovery: resubmit corrected cutoffs immediately.
-    ///         The 48h emergencyResetDraw() path is fallback if keeper cannot self-correct.
-    ///         Restoration via emergencyResetDraw(): _continueUnwind() restores OGs whose
-    ///         statusLostAtDraw == lastResetDraw. Only that draw's losses are reversible.
-    ///         See deployment runbook for full recovery procedure.
-    event MatchCountMismatch(
-        uint256 indexed draw,
-        uint256 t1Actual,
-        uint256 t12Actual,
-        uint256 t123Actual,
-        uint256 snapshot
-    );
-    event MatchingBatchProcessed(uint256 indexed draw, uint256 processed, uint256 total);
-    event PrizeDistributed(address indexed winner, uint256 amount, uint256 tier);
+    // @dev Emitted in three places post-v2.34: (1) OG matching in _processMatchesCore()
+    //      when OG prediction2 is stale/zero; (2) casual matching in _processMatchesCore()
+    //      for lastTicketCount>=2 players when prediction2 stale/zero (added v2.34 M-01);
+    //      (3) _applyAutoPredictions(). NOT OG-exclusive post v2.34 M-01. [v2.35 NS-I-03]
+    //      Subgraphs inferring OG status from this event must be updated.
+    // @notice [CRE v1.0] Emitted when the CRE forwarder address is set or cleared.
+    // @notice [CRE v1.0] Emitted after every successfully processed CRE report.
+    // @notice Emitted when post-match winner counts fall outside expected BPS bounds. [v1.2]
+    //         Winner arrays cleared; drawPhase reverts to CUTOFF_SUBMISSION for resubmission.
+    //         Tier pools preserved for the corrected pass. OG status losses from the failed
+    //         pass are NOT reversed. Fastest recovery: resubmit corrected cutoffs immediately.
+    //         The 48h emergencyResetDraw() path is fallback if keeper cannot self-correct.
+    //         Restoration via emergencyResetDraw(): _continueUnwind() restores OGs whose
+    //         statusLostAtDraw == lastResetDraw. Only that draw's losses are reversible.
+    //         See deployment runbook for full recovery procedure.
     // [v1.0] JPMissRedistributed REMOVED -- T1 always has winners, no miss path.
     // [v1.0] TierNoWinners REMOVED -- percentage cutoffs are designed so entries exist in each tier.
-    /// @notice Emitted when keeper submits cutoff diffs. [v1.0]
-    ///         Keepers read all predictions from chain, sort off-chain, find
-    ///         diff values at 1%, ~6%, and ~12-15% thresholds (draw-schedule dependent), submit here.
-    ///         If not submitted within DRAW_STUCK_TIMEOUT, emergencyResetDraw() available.
-    ///         Counts are cumulative: t1Count = T1 entries, t2Count = T1+T2, t3Count = all winners.
-    event CutoffDiffsSubmitted(
-        uint256 indexed draw,
-        uint256 t1CutoffDiff,
-        uint256 t2CutoffDiff,
-        uint256 t3CutoffDiff,
-        uint256 t1Count,
-        uint256 t2Count,
-        uint256 t3Count
-    );
-    /// @notice Seed/rollover returns to prizePot each draw. 10% of weeklyPool.
-    ///         On draw 30 (surplus path): emits SeedReturned(30, 0) -- same as draw 52 in 1Y.
-    event SeedReturned(uint256 indexed draw, uint256 amount);
-    event WeekFinalized(uint256 indexed draw);
-    event GameClosed(uint256 perOG, uint256 surplusToTreasury, uint256 qualifiedOGs);
-    event YieldCaptured(uint256 yieldAmount);
-    event AccountingDiscrepancy(uint256 trackedUnclaimed, uint256 claimAmount);
-    /// @notice Emitted when a post-transfer balance check detects potential underfunding. [v1.51]
-    ///         Non-fatal: emitted as an early warning, does not revert the calling function.
-    ///         allocated: sum of all tracked on-chain obligations at time of check.
-    ///         balance: actual USDC balance held by contract (no aUSDC in v1.52).
-    ///         context: which function triggered the check (for monitoring/alerting).
-    event SolvencyAlert(uint256 indexed allocated, uint256 balance, bytes32 context);
-    /// @notice Emitted when the geometric solver detects structural insolvency:
-    ///         even at breath=0 (no prizes, only revenue added) the floor cannot be reached.
-    ///         Wire monitoring to this event and trigger proposeDormancy() review on receipt.
-    event SolverDistressSignal(uint256 indexed draw, uint256 pot, uint256 floor, uint256 drawsLeft, uint256 projectedAtZero);
-    /// @dev [v1.57-P1] Emitted when OG registration confirmed and 72h window opens.
-    ///      windowExpiry: block.timestamp + OG_DECLINE_WINDOW. Call cancelOGRegistration()
-    ///      before this timestamp for a 75% refund. [CRE v0.2 / LOW-02] was "90% refund" (old 10% treasury rate).
-    event OGDeclineWindowOpened(address indexed player, uint256 windowExpiry);
-    /// @dev [v1.57-P1] Emitted when OG cancels within 72h window.
-    ///      netRefund = ogTransfer * 75%. Treasury slice (25%) is permanently retained.
-    ///      [CRE v0.2 / LOW-02] was "90% / 10%" — rates updated to match UF_OG_TREASURY_BPS = 2500.
-    event OGRegistrationCancelled(address indexed player, uint256 netRefund);
-    event EndgameClaimed(address indexed og, uint256 amount);
-    event TreasuryWithdrawal(uint256 amount, address recipient);
-    event UnclaimedFundsSwept(bytes32 indexed reason, uint256 amount);
-    event TreasuryAccrual(uint256 indexed draw, uint256 amount, uint256 rateBps);
-    event PrizeRateReductionProposed(uint256 newMultiplier, uint256 effectiveTime, bytes32 reason);
-    event PrizeRateReductionExecuted(uint256 oldMultiplier, uint256 newMultiplier, bytes32 reason);
-    event PrizeRateReductionCancelled();
-    event PrizeRateIncreaseProposed(uint256 newMultiplier, uint256 effectiveTime, bytes32 reason);
-    event PrizeRateIncreaseExecuted(uint256 oldMultiplier, uint256 newMultiplier, bytes32 reason);
-    event PrizeRateIncreaseCancelled();
-    event FeedStaleFallback();
-    event ReserveFeedUsed(address indexed feed, uint256 indexed draw);
-    event FeedChangeProposed(address newFeed, uint256 effectiveTime);
-    event FeedChangeExecuted(address oldFeed, address newFeed);
-    event FeedChangeCancelled();
-    event EmergencyReset(uint256 indexed draw, DrawPhase fromPhase, uint256 amountReturned);
-    event EmergencyUnwindBatch(uint256 indexed draw, uint256 unwoundSoFar, uint256 total);
-    event PredictionResetOnUnwind(address indexed player, uint256 indexed draw);
-    event EmergencyUnwindComplete(uint256 indexed draw, uint256 total);
-    event PrizeClaimed(address indexed player, uint256 amount);
-    event DormancyActivated(uint256 timestamp);
-    event DormancyClaimDeadline(uint256 deadline);
-    event DormancyRefund(address indexed player, uint256 amount);
-    event DormancyProposed(uint256 effectiveTime);
-    event DormancyCancelled();
-    event ResetRefundClaimed(address indexed player, uint256 indexed draw, uint256 amount);
-    event ResetRefundPartial(address indexed player, uint256 indexed draw, uint256 paid, uint256 owed);
-    event ResetRefundExpiredSwept(uint256 indexed draw, uint256 amount);
-    event ResetRefundSkipped(uint256 indexed draw, uint256 unprotectedTicketTotal);
-    event ResetRefundOverflow(uint256 indexed draw, uint256 amount);
-    event CommitmentRefundActivated(uint256 indexed draw, uint256 poolAmount);
-    event CommitmentRefundClaimed(address indexed player, uint256 amount);
-    event CommitmentRefundPartial(address indexed player, uint256 paid, uint256 owed);
-    event CommitmentRefundExpiredSwept(uint256 indexed draw, uint256 amount);
-    event DormancyRemainderSwept(uint256 toProtocolBeneficiary);
-    event FailedPregameSwept(uint256 toProtocolBeneficiary);
-    /// @notice [CRE v0.6 / MEDIUM-01] Emitted when a deposited VC seed is returned to
-    ///         VC_SEED_RETURN_ADDRESS during sweepFailedPregame() because the game never started.
-    event FailedPregameSeedReturned(uint256 seedReturned);
-    event StreakBroken(address indexed player, uint256 previousStreak);
-    /// @notice Emitted when a weekly OG reaches WEEKLY_OG_QUALIFICATION_WEEKS consecutive draws.
-    ///         [v1.3] Now emits exclusively from _updateStreakTracking (via buyTickets).
-    ///         In v1.2 and earlier this could also emit from the mulligan path during MATCHING.
-    ///         Monitoring infrastructure should be aware it originates only from buyTickets.
-    event EarnedOGQualified(address indexed player, uint256 atDraw);
-    /// @dev [v1.58-P3] Emitted once at startGame() when obligation is locked at draw 1.
-    ///      obligation = maxOGs * OG_UPFRONT_COST (gross, ceiling at startGame).
-    ///      requiredPot = obligation * targetReturnBps/10000 + DRAW30_PRIZE_RESERVE + (VC_SEED - seedReleased). [CRE v0.8 / NS-L-01]
-    ///      qualifiedOGs = upfrontOGCount + earnedOGCount at the moment of startGame().
-    event OGObligationLocked(uint256 obligation, uint256 requiredPot, uint256 qualifiedOGs);
-    /// @dev [v1.58-P3] Emitted every draw when OG count or requiredEndPot changes.
-    ///      Called from _snapshotOGObligation() after each _finalizeWeekCore().
-    ///      Not emitted if both obligation and requiredEndPot are unchanged (early return).
-    event OGObligationSnapshot(uint256 indexed draw, uint256 oldObligation, uint256 newObligation, uint256 oldRequiredPot, uint256 newRequiredPot, uint256 ogCount);
-    event BreathMultiplierAdjusted(uint256 oldMultiplier, uint256 newMultiplier, bool isUp);
-    event BreathOverrideProposed(uint256 indexed newMultiplier, uint256 effectiveTime, bytes32 reason);
-    event BreathOverrideCancelled(uint256 cancelledMultiplier);
-    event BreathOverrideExecuted(uint256 oldMultiplier, uint256 newMultiplier, bytes32 reason);
-    event BreathRailsUpdated(uint256 newMin, uint256 newMax, uint256 atDraw);
-    event BreathRailsProposed(uint256 newMin, uint256 newMax, uint256 effectiveTime, bytes32 reason);
-    event BreathRailsProposalCancelled(uint256 cancelledMin, uint256 cancelledMax);
-    /// @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
-    event OGIntentForceDeclineFailed(address indexed player, uint256 amount); // [v1.57-P1] never emitted -- forceDeclineIntent removed
-    event EndgameShortfall(uint256 perOGPaid, uint256 perOGPromised, uint256 shortfallTotal);
-    event PlayerLapsed(address indexed player, uint256 atDraw);
-    event PlayerUnlapsed(address indexed player, uint256 atDraw);
-    /// @notice Emitted at startGame() after breath calibration. [v1.5]
-    ///         ogBreathBps: OG-obligation-aware starting breath from _computeStartingBreathFromTarget(targetReturnBps).
-    ///         t3FloorBps:  T3-prize-floor breath from _computeStartingBreath (draws on pregame data).
-    ///         initialBreathBps: actual starting breath used = max(ogBreathBps, t3FloorBps).
-    ///         estimatedEntriesDraw1: entry count estimate used in T3-floor formula.
-    event BreathCalibrated(
-        uint256 ogRatioBps,
-        uint256 targetReturnBps,
-        uint256 initialBreathBps,
-        uint256 ogBreathBps,
-        uint256 t3FloorBps,
-        uint256 estimatedEntriesDraw1
-    );
-    /// @dev [v1.57-P2] Emitted at FINAL_CALIBRATION_DRAW (draw 28) when targetReturnBps
-    ///      is recalibrated from actual late-game OG ratio and requiredEndPot updated.
-    event FinalReturnCalibrated(uint256 indexed draw, uint256 oldTargetBps, uint256 newTargetBps, uint256 newRatioBps, uint256 newRequiredEndPot);
-    /// @dev [v1.60] Emitted when a new exhale floor release threshold is proposed.
-    event ExhaleFloorReleaseProposed(uint256 newBps, uint256 executeAfter);
-    /// @dev [v1.60] Emitted when the exhale floor release threshold is updated.
-    event ExhaleFloorReleaseUpdated(uint256 oldBps, uint256 newBps);
-    /// @dev [v1.62] Emitted when a pending exhale floor release proposal is cancelled.
-    event ExhaleFloorReleaseCancelled(uint256 cancelledBps);
-    /// @dev [v1.63] Emitted when draw30BonusFund is returned to prizePot on dormancy activation.
-    event Draw30BonusReturned(uint256 amount);
-    /// @dev [v1.57-P2] Emitted at draw 7 when targetReturnBps is recalibrated.
-    ///      [v1.61] computedBreath is the formula estimate from _computeStartingBreathFromTarget --
-    ///      NOT the solver-applied value. The actual breathMultiplier after draw 7
-    ///      is in the subsequent BreathMultiplierAdjusted event at draw 8.
-    event BreathRecalibrated(uint256 oldTargetBps, uint256 newTargetBps, uint256 oldBreath, uint256 computedBreath, uint256 actualRatioBps);
-    /// @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
-    event OGIntentRegistered(address indexed player, uint256 queueIndex, uint256 amount); // [v1.57-P1] never emitted -- intent queue removed
-    /// @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
-    event OGIntentOffered(address indexed player, uint256 windowExpiry); // [v1.57-P1] never emitted
-    /// @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
-    event OGIntentDeclined(address indexed player, uint256 netRefund, uint256 grossAmount, uint256 depositKept); // [v1.57-P1] never emitted
-    /// @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
-    event OGIntentSwept(address indexed player); // [v1.57-P1] never emitted
-    /// @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
-    event OGIntentForcedDeclined(address indexed player, uint256 refund, uint256 grossAmount); // [v1.57-P1] never emitted
-    event ForceDeclineRefundClaimed(address indexed player, uint256 amount);
-    /// @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
-    event OGSlotsConfirmed(uint256 confirmed, uint256 pendingRemaining); // [v1.57-P1] never emitted -- confirmOGSlots removed
-    event DefaultPredictionUpdated(uint256 oldPrediction, uint256 newPrediction);
+    // @notice Emitted when keeper submits cutoff diffs. [v1.0]
+    //         Keepers read all predictions from chain, sort off-chain, find
+    //         diff values at 1%, ~6%, and ~12-15% thresholds (draw-schedule dependent), submit here.
+    //         If not submitted within DRAW_STUCK_TIMEOUT, emergencyResetDraw() available.
+    //         Counts are cumulative: t1Count = T1 entries, t2Count = T1+T2, t3Count = all winners.
+    // @notice Seed/rollover returns to prizePot each draw. 10% of weeklyPool.
+    //         On draw 30 (surplus path): emits SeedReturned(30, 0) -- same as draw 52 in 1Y.
+    // @notice Emitted when a post-transfer balance check detects potential underfunding. [v1.51]
+    //         Non-fatal: emitted as an early warning, does not revert the calling function.
+    //         allocated: sum of all tracked on-chain obligations at time of check.
+    //         balance: actual USDC balance held by contract (no aUSDC in v1.52).
+    //         context: which function triggered the check (for monitoring/alerting).
+    // @notice Emitted when the geometric solver detects structural insolvency:
+    //         even at breath=0 (no prizes, only revenue added) the floor cannot be reached.
+    //         Wire monitoring to this event and trigger proposeDormancy() review on receipt.
+    // @dev [v1.57-P1] Emitted when OG registration confirmed and 72h window opens.
+    //      windowExpiry: block.timestamp + OG_DECLINE_WINDOW. Call cancelOGRegistration()
+    //      before this timestamp for a 75% refund. [CRE v0.2 / LOW-02] was "90% refund" (old 10% treasury rate).
+    // @dev [v1.57-P1] Emitted when OG cancels within 72h window.
+    //      netRefund = ogTransfer * 75%. Treasury slice (25%) is permanently retained.
+    //      [CRE v0.2 / LOW-02] was "90% / 10%" — rates updated to match UF_OG_TREASURY_BPS = 2500.
+    // @notice [CRE v0.6 / MEDIUM-01] Emitted when a deposited VC seed is returned to
+    //         VC_SEED_RETURN_ADDRESS during sweepFailedPregame() because the game never started.
+    // @notice Emitted when a weekly OG reaches WEEKLY_OG_QUALIFICATION_WEEKS consecutive draws.
+    //         [v1.3] Now emits exclusively from _updateStreakTracking (via buyTickets).
+    //         In v1.2 and earlier this could also emit from the mulligan path during MATCHING.
+    //         Monitoring infrastructure should be aware it originates only from buyTickets.
+    // @dev [v1.58-P3] Emitted once at startGame() when obligation is locked at draw 1.
+    //      obligation = maxOGs * OG_UPFRONT_COST (gross, ceiling at startGame).
+    //      requiredPot = obligation * targetReturnBps/10000 + DRAW30_PRIZE_RESERVE + (VC_SEED - seedReleased). [CRE v0.8 / NS-L-01]
+    //      qualifiedOGs = upfrontOGCount + earnedOGCount at the moment of startGame().
+    // @dev [v1.58-P3] Emitted every draw when OG count or requiredEndPot changes.
+    //      Called from _snapshotOGObligation() after each _finalizeWeekCore().
+    //      Not emitted if both obligation and requiredEndPot are unchanged (early return).
+    // @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
+    // @notice Emitted at startGame() after breath calibration. [v1.5]
+    //         ogBreathBps: OG-obligation-aware starting breath from _computeStartingBreathFromTarget(targetReturnBps).
+    //         t3FloorBps:  T3-prize-floor breath from _computeStartingBreath (draws on pregame data).
+    //         initialBreathBps: actual starting breath used = max(ogBreathBps, t3FloorBps).
+    //         estimatedEntriesDraw1: entry count estimate used in T3-floor formula.
+    // @dev [v1.57-P2] Emitted at FINAL_CALIBRATION_DRAW (draw 28) when targetReturnBps
+    //      is recalibrated from actual late-game OG ratio and requiredEndPot updated.
+    // @dev [v1.60] Emitted when a new exhale floor release threshold is proposed.
+    // @dev [v1.60] Emitted when the exhale floor release threshold is updated.
+    // @dev [v1.62] Emitted when a pending exhale floor release proposal is cancelled.
+    // @dev [v1.63] Emitted when draw30BonusFund is returned to prizePot on dormancy activation.
+    // @dev [v1.57-P2] Emitted at draw 7 when targetReturnBps is recalibrated.
+    //      [v1.61] computedBreath is the formula estimate from _computeStartingBreathFromTarget --
+    //      NOT the solver-applied value. The actual breathMultiplier after draw 7
+    //      is in the subsequent BreathMultiplierAdjusted event at draw 8.
+    // @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
+    // @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
+    // @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
+    // @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
+    // @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
+    // @dev [v1.57-P1] Never emitted in v1.57+. Retained for ABI compatibility only.
     // ── [CRE v0.1 / SmartEarn] VC earnout events ───────────────────────────────
-    event PotSeeded(uint256 amount, address indexed seeder);
-    /// @dev [CRE v0.9 / NS-I-01] totalSeedReleased is PROVISIONAL. This event fires in
-    ///      _calculatePrizePools() when the supplement is added to the weekly pool, but after
-    ///      CR-L-01 the seedReleased state variable is not incremented until _finalizeWeekCore()
-    ///      (guarded !isResetFinalize). The value emitted here is the projected post-finalize
-    ///      cumulative (current seedReleased + this draw's supplement). If the draw is voided by
-    ///      emergencyResetDraw() before finalize, the increment never lands and this figure is NOT
-    ///      realised. Subgraphs should treat totalSeedReleased as confirmed only once the matching
-    ///      draw reaches a non-reset finalize; reconcile against on-chain seedReleased if in doubt.
-    event SeedSupplementPaid(uint256 indexed draw, uint256 supplement, uint256 totalSeedReleased);
-    /// @notice [CRE v1.09] Emitted when the seeded cold-start floor releases seed to lift T3 to
-    ///         TICKET_PRICE per winner (pro-rata across tiers). Early draws only, shortfall only.
-    event SeedT3FloorTopup(uint256 indexed draw, uint256 topupRecorded, uint256 t3Winners);
-    event SeedReleaseRatioProposed(uint256 indexed newRatio, uint256 effectiveTime);
-    event SeedReleaseRatioExecuted(uint256 indexed oldRatio, uint256 indexed newRatio);
-    event SeedReleaseRatioCancelled(uint256 indexed cancelledRatio);
-    event VCReturnClaimed(uint256 amount);
+    // @dev [CRE v0.9 / NS-I-01] totalSeedReleased is PROVISIONAL. This event fires in
+    //      _calculatePrizePools() when the supplement is added to the weekly pool, but after
+    //      CR-L-01 the seedReleased state variable is not incremented until _finalizeWeekCore()
+    //      (guarded !isResetFinalize). The value emitted here is the projected post-finalize
+    //      cumulative (current seedReleased + this draw's supplement). If the draw is voided by
+    //      emergencyResetDraw() before finalize, the increment never lands and this figure is NOT
+    //      realised. Subgraphs should treat totalSeedReleased as confirmed only once the matching
+    //      draw reaches a non-reset finalize; reconcile against on-chain seedReleased if in doubt.
+    // @notice [CRE v1.09] Emitted when the seeded cold-start floor releases seed to lift T3 to
+    //         TICKET_PRICE per winner (pro-rata across tiers). Early draws only, shortfall only.
 
     // ── Enums ────────────────────────────────────────────────────────────────
-    enum GamePhase { PREGAME, ACTIVE, DORMANT, CLOSED }
-    /// @dev Draw phase flow:
-    ///      IDLE -> CUTOFF_SUBMISSION -> MATCHING -> DISTRIBUTING -> FINALIZING -> IDLE
-    ///      resolveWeek() transitions IDLE -> CUTOFF_SUBMISSION.
-    ///      submitCutoffDiffs() transitions CUTOFF_SUBMISSION -> MATCHING.
-    ///      _processMatchesCore() transitions MATCHING -> DISTRIBUTING (or back to CUTOFF_SUBMISSION on mismatch).
-    ///      _distributePrizesCore() transitions DISTRIBUTING -> FINALIZING.
-    ///      _finalizeWeekCore() transitions FINALIZING -> IDLE (or RESET_FINALIZING -> IDLE).
-    ///      UNWINDING: emergency reset OG-restoration pass before RESET_FINALIZING.
-    enum DrawPhase { IDLE, CUTOFF_SUBMISSION, MATCHING, DISTRIBUTING, FINALIZING, RESET_FINALIZING, UNWINDING }
+    // @dev Draw phase flow:
+    //      IDLE -> CUTOFF_SUBMISSION -> MATCHING -> DISTRIBUTING -> FINALIZING -> IDLE
+    //      resolveWeek() transitions IDLE -> CUTOFF_SUBMISSION.
+    //      submitCutoffDiffs() transitions CUTOFF_SUBMISSION -> MATCHING.
+    //      _processMatchesCore() transitions MATCHING -> DISTRIBUTING (or back to CUTOFF_SUBMISSION on mismatch).
+    //      _distributePrizesCore() transitions DISTRIBUTING -> FINALIZING.
+    //      _finalizeWeekCore() transitions FINALIZING -> IDLE (or RESET_FINALIZING -> IDLE).
+    //      UNWINDING: emergency reset OG-restoration pass before RESET_FINALIZING.
     enum OGIntentStatus { NONE, PENDING, OFFERED, DECLINED, SWEPT }
 
     // ── Constants ────────────────────────────────────────────────────────────
@@ -386,6 +184,20 @@ contract BullsEth is ReentrancyGuard, Ownable2Step {
     /// @dev [v1.58-P3] Binary search iterations for _solveGeometricBps().
     ///      24 iterations gives BPS precision < 1 on any feasible breath range.
     uint256 public constant GEOM_SOLVER_ITERS      = 24;
+    /// @dev [v1.14 / H-01] Failed cutoff submissions on one draw before emergencyResetDraw()
+    ///      becomes available immediately, bypassing DRAW_STUCK_TIMEOUT. Three gives an honest
+    ///      keeper two retries for an ordinary mistake before the draw is declared unsatisfiable.
+    uint256 public constant MAX_CUTOFF_ATTEMPTS    = 3;
+    /// @dev [v1.15 / C-01] How long after the scheduled slot the RESTRICTED fallback
+    ///      resolveWeek() becomes available. Normal settlement uses resolveWeek(roundId),
+    ///      which is permissionless and pinned. The fallback reads the feed at whatever
+    ///      moment its caller picks, so it is gated to owner/keeper and held back long
+    ///      enough that it is a genuine feed-failure escape rather than a routine path.
+    uint256 public constant RESOLVE_FALLBACK_DELAY = 12 hours;
+    /// @dev [v1.15 / C-01] When firstness of a pinned round cannot be proven (a Chainlink
+    ///      proxy phase boundary makes roundId - 1 meaningless), the round must instead sit
+    ///      within this window of the scheduled slot. Bounds the residual choice.
+    uint256 public constant PINNED_ROUND_TOLERANCE = 1 hours;
 
     // [v1.57-P1] OG_INTENT_WINDOW deprecated -- intent queue removed. Superseded by OG_DECLINE_WINDOW.
     // [v1.57-P1 deprecated]
@@ -927,7 +739,21 @@ uint256 public dormancyParticipantCount;
     ///         so activateDormancy() subtracts this from raw drawsPlayed to keep OG pro-rata honest.
     ///         Incremented once per completed reset in _finalizeWeekCore()'s isResetFinalize branch.
     ///         Storage-appended after dormancyDrawsPlayed (layout-safe; no reordering of prior slots).
+    ///         [v1.17 / IC-02] NOTE: "layout-safe" here means safe RELATIVE TO v1.11b. That release
+    ///         made ethReserveFeed and wethFeed immutable, removing two storage slots and shifting
+    ///         everything after them, so any upgrade path crossing the v1.11b boundary is NOT
+    ///         layout-compatible. All "storage-appended / layout-safe" notes below assume a v1.11b+
+    ///         baseline.
     uint256 public resetDrawCount;
+
+    /// @notice [v1.14 / H-01] Consecutive MatchCountMismatch bounces on the CURRENT draw.
+    ///         Cleared at resolveWeek(), at finalize, and on emergency reset. When it reaches
+    ///         MAX_CUTOFF_ATTEMPTS the owner may call emergencyResetDraw() immediately, without
+    ///         waiting out DRAW_STUCK_TIMEOUT. Needed because every bounce refreshes
+    ///         phaseStartTimestamp and so does every resubmission, meaning a keeper retrying an
+    ///         unsatisfiable draw in good faith could hold it open indefinitely and the 48h
+    ///         escape hatch would never unlock. Storage-appended; layout-safe.
+    uint256 public cutoffAttempts;
 
     /// @notice [CRE v1.0] Address authorised to deliver CRE reports via onReport().
     ///         Set to the Chainlink KeystoneForwarder for the target chain, NOT a
@@ -1041,6 +867,15 @@ uint256 public dormancyParticipantCount;
         if (_vcSeed > 0) {
             if (_maxSeedReleaseRatioBps == 0) revert ExceedsLimit();
             if (_maxSeedReleaseRatioBps * (10000 + VC_SPENT_RETURN_BPS + VC_SPENT_BONUS_BPS) > 10000 * 10000) revert ExceedsLimit();
+            // [v1.17 / M-02] Fold the withdraw-reserve buffer into the solvency bound. The
+            // withdraw lock in _withdrawTreasury reserves
+            //   _releasable * (10000 + VC_SPENT_RETURN_BPS + VC_SPENT_BONUS_BPS)/1e4
+            //              * (10000 + VC_RESERVE_BUFFER_BPS)/1e4,  with _releasable = CT*ratio/1e4.
+            // At the old ceiling (6666) that reaches CT*1.0499, past the treasury the first bound
+            // proves, so a revenue-heavy season could push the reserve above treasuryBalance and
+            // lock withdrawals until settlement. Folding the 5% buffer in caps the ratio at 6349
+            // and moves the failure to deploy time, a far kinder failure than a mid-season lock.
+            if (_maxSeedReleaseRatioBps * (10000 + VC_SPENT_RETURN_BPS + VC_SPENT_BONUS_BPS) * (10000 + VC_RESERVE_BUFFER_BPS) > uint256(10000) * 10000 * 10000) revert ExceedsLimit();
         }
         VC_SEED                    = _vcSeed;
         VC_SEED_RETURN_ADDRESS     = _vcSeedReturnAddress;
@@ -1065,14 +900,7 @@ uint256 public dormancyParticipantCount;
 
     // ── [CRE v0.1 / SmartEarn] VC seed ──────────────────────────────────────────
 
-    /// @notice Seeds the prize pot with exactly VC_SEED USDC. Callable once during PREGAME only.
-    ///         VC capital goes 100% to prizePot — no treasury slice on seed.
-    ///         The seed supplement activates only after SEED_RELEASE_THRESHOLD of cumulative
-    ///         season treasury is earned AND seedReleaseRatioBps > 0.
-    ///         [CRE v0.2 / LOW-01] Restricted to onlyOwner (was permissionless). A stranger calling
-    ///         this would pull VC_SEED from their own wallet and route it to VC_SEED_RETURN_ADDRESS
-    ///         at close — not theft, but an accidental donation. Phase gate added: PREGAME only.
-    ///         A post-game call would seed a closed/dormant contract with no distribution path.
+    /// @inheritdoc IBullsEthCRE
     function seedPot() external onlyOwner nonReentrant {
         if (gamePhase != GamePhase.PREGAME) revert WrongPhase();
         if (VC_SEED == 0) revert BelowMinimum();
@@ -1085,7 +913,7 @@ uint256 public dormancyParticipantCount;
 
     // ── Registration ──────────────────────────────────────────────────────────
 
-    /// @notice Registers the caller as a player. Required before any other action.
+    /// @inheritdoc IBullsEthCRE
     function register() external nonReentrant {
         if (gamePhase != GamePhase.PREGAME && gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (players[msg.sender].registered) revert AlreadyRegistered();
@@ -1100,8 +928,7 @@ uint256 public dormancyParticipantCount;
         emit PlayerRegistered(msg.sender, totalRegisteredPlayers);
     }
 
-    /// @notice Pays the pregame ticket commitment and locks in a prediction. PREGAME only.
-    /// @param prediction  ETH/USD price prediction in USD cents.
+    /// @inheritdoc IBullsEthCRE
     function payCommitment(uint256 prediction) external nonReentrant {
         if (gamePhase != GamePhase.PREGAME) revert WrongPhase();
         if (block.timestamp >= signupDeadline) revert PregameWindowExpired();
@@ -1124,14 +951,7 @@ uint256 public dormancyParticipantCount;
         emit CommitmentPaid(msg.sender, cost);
     }
 
-    /// @notice Pregame double-ticket commitment. Pays 2x TICKET_PRICE upfront.
-    ///         WARNING [v1.54]: If the player buys only 1 ticket on draw 1, the second credit
-    ///         is NOT refunded -- it is forfeited to the prize pool. CommitmentDoubleUnused fires
-    ///         on draw 2 when the expired credit is detected. Players uncertain about buying 2 tickets
-    ///         on draw 1 should use payCommitment() (single) instead. This is by design: the double
-    ///         commitment signals intent to play 2 tickets from day one.
-    /// @param prediction   First ETH/USD prediction (USD cents).
-    /// @param prediction2  Second ETH/USD prediction (USD cents).
+    /// @inheritdoc IBullsEthCRE
     function payCommitmentDouble(uint256 prediction, uint256 prediction2) external nonReentrant {
         if (gamePhase != GamePhase.PREGAME) revert WrongPhase();
         if (block.timestamp >= signupDeadline) revert PregameWindowExpired();
@@ -1156,19 +976,7 @@ uint256 public dormancyParticipantCount;
         emit CommitmentDoublePaid(msg.sender, cost);
     }
 
-    /// @notice Registers caller as an Upfront OG. Pays OG_UPFRONT_COST immediately.
-    ///         OG status is GRANTED IMMEDIATELY -- no queue, no owner confirmation needed.
-    ///         If a pregame commitment credit was applied, that credit is forfeited on
-    ///         cancellation -- only the OG transfer net of 25% is returned.
-    ///         A 72-hour voluntary decline window opens. Call cancelOGRegistration() within
-    ///         72 hours for a 75% refund (25% treasury slice non-refundable as commitment).
-    ///         [CRE v0.2 / LOW-02] was "90% refund (10% treasury slice)". Rates updated for flat 25%.
-    ///         After 72 hours the registration is permanent.
-    /// @dev [v1.57-P1] Intent queue removed entirely. No PENDING status. No confirmOGSlots().
-    ///      No ratio cap on OG registration. Any number of OGs can register.
-    ///      Game can start with 100% OGs if that is what happens -- economics handle it.
-    /// @param prediction   ETH/USD price in USD cents. Primary prediction for all draws.
-    /// @param prediction2  Secondary prediction (second match entry). May equal prediction.
+    /// @inheritdoc IBullsEthCRE
     function registerAsOG(uint256 prediction, uint256 prediction2) external nonReentrant {
         if (gamePhase != GamePhase.PREGAME) revert WrongPhase();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -1242,19 +1050,7 @@ uint256 public dormancyParticipantCount;
         emit OGDeclineWindowOpened(msg.sender, windowExpiry);
     }
 
-    /// @notice Cancels an OG registration within the 72-hour decline window.
-    ///         Returns 75% of the OG transfer (ogTransfer * 75%).
-    ///         The 25% treasury slice is non-refundable -- it was the commitment signal.
-    ///         [CRE v0.2 / LOW-02] was "90% / 10%" — updated for flat 25% treasury.
-    ///         If a commitment credit was applied at registration, the credit is forfeited.
-    ///         This is voluntary consumer protection. The window is player-controlled.
-    ///         Re-registration: cancelling does NOT set dormancyRefunded. The player may
-    ///         call registerAsOG() again (paying another 25% treasury slice each time).
-    ///         Each attempt costs the same treasury signal. This is intentional.
-    /// @dev [v1.57-P1] Replaces claimOGIntentRefund(). No queue state to unwind.
-    ///      Uses stored ogCancelRefund mapping to avoid mixed-rate calculation errors
-    ///      (commitment paid 25% treasury; OG transfer paid 25% UF treasury).
-    ///      [CRE v0.5 / NS] Corrected from "15%/10%" — both rates are now 25% in CRE v0.1+.
+    /// @inheritdoc IBullsEthCRE
     function cancelOGRegistration() external nonReentrant {
         if (gamePhase != GamePhase.PREGAME) revert WrongPhase();
         uint256 expiry = ogDeclineWindowExpiry[msg.sender];
@@ -1344,11 +1140,7 @@ uint256 public dormancyParticipantCount;
 
 
 
-    /// @notice Claims any outstanding force-decline refund owed to the caller.
-    /// @dev [v1.57-P1] forceDeclineIntent() was removed with the intent queue.
-    ///      forceDeclineRefundOwed[] is never written in the new design.
-    ///      This function always reverts NothingToClaim() for any new deployment.
-    ///      Retained for ABI compatibility with tooling built against earlier versions.
+    /// @inheritdoc IBullsEthCRE
     function claimForceDeclineRefund() external nonReentrant {
         uint256 owed = forceDeclineRefundOwed[msg.sender];
         if (owed == 0) revert NothingToClaim();
@@ -1358,17 +1150,7 @@ uint256 public dormancyParticipantCount;
         emit ForceDeclineRefundClaimed(msg.sender, owed);
     }
 
-    /// @notice Registers caller as a Weekly OG. Pays 2x TICKET_PRICE. PREGAME only.
-    ///         Weekly OGs must buy tickets every draw to maintain status.
-    ///         Missing a draw loses status -- no mulligan in BullsEth.
-    ///         Note: weekly OG registration has NO 72-hour decline window.
-    ///         Unlike registerAsOG(), this registration is immediate and permanent.
-    ///         Weekly OG slots may be fully consumed by upfront OG uptake if
-    ///         upfrontOGCount exceeds TOTAL_OG_CAP_BPS% of committed players.
-    /// @dev [v1.57-P1] startGameProposedAt guard now throws TimelockPending (was ActiveDeclineWindowOpen).
-    ///      Weekly OG ratio cap (_weeklyOGCapReached) still enforced. Upfront OG cap removed.
-    /// @param prediction   First ETH/USD prediction for the current draw (USD cents).
-    /// @param prediction2  Second ETH/USD prediction for the current draw (USD cents).
+    /// @inheritdoc IBullsEthCRE
     function registerAsWeeklyOG(uint256 prediction, uint256 prediction2) external nonReentrant {
         if (gamePhase != GamePhase.PREGAME) revert WrongPhase();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -1432,8 +1214,7 @@ uint256 public dormancyParticipantCount;
     //          emitted by the startGame primary-fail repoint). The primary feed (ethFeed) stays
     //          mutable with its full proposeFeedChange/executeFeedChange timelock path intact.
 
-    /// @notice Sets the global auto-default prediction value. Owner only.
-    /// @param _prediction  Default prediction in USD cents. Used when autoDefaultCents == 0.
+    /// @inheritdoc IBullsEthCRE
     function setDefaultPrediction(uint256 _prediction) external onlyOwner {
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
         if (gamePhase != GamePhase.PREGAME && gamePhase != GamePhase.ACTIVE) revert WrongPhase();
@@ -1443,9 +1224,7 @@ uint256 public dormancyParticipantCount;
         emit DefaultPredictionUpdated(old, _prediction);
     }
 
-    /// @notice Proposes game start with START_GAME_NOTICE_PERIOD (72h) notice.
-    ///         Requires MIN_PLAYERS_TO_START (500) committed players.
-    /// @dev [v1.57-P1] pendingIntentCount check removed -- intent queue eliminated.
+    /// @inheritdoc IBullsEthCRE
     function proposeStartGame() external onlyOwner {
         if (gamePhase != GamePhase.PREGAME) revert GameNotActive();
         if (committedPlayerCount < MIN_PLAYERS_TO_START) revert NotEnoughPlayers();
@@ -1459,22 +1238,14 @@ uint256 public dormancyParticipantCount;
         emit StartGameProposed(block.timestamp + START_GAME_NOTICE_PERIOD);
     }
 
-    /// @notice Cancels a pending startGame() proposal. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function cancelStartGameProposal() external onlyOwner {
         if (startGameProposedAt == 0) revert NoTimelockPending();
         startGameProposedAt = 0;
         emit StartGameProposalCancelled();
     }
 
-    /// @notice Starts the game, sets draw 1, calibrates breath from OG ratio.
-    /// @dev [v1.57-P2] STEP 1 computes targetReturnBps from actual OG ratio (50% at <=20% OG,
-    ///      linear to 10% at 100% OG). [CRE v0.2 / LOW-02] corrected from "90%/30%". STEP 2 derives ogBreath from targetReturnBps.
-    ///      STEP 3 takes max(ogBreath, t3FloorBreath) as starting breathMultiplier.
-    /// @dev [v1.58-P3] Locks OG obligation immediately. Runs geometric solvency check.
-    ///      Reverts with PotBelowTrajectory if the game cannot honour obligations at breathRailMin.
-    ///      [v1.62] _simGeomPot does not model the draw30BonusFund injection at draw 30.
-    ///      In reality the draw-30 pot = simulated_pot + draw30BonusFund accumulated,
-    ///      so the solvency check underestimates the final pot. Conservative (pessimistic).
+    /// @inheritdoc IBullsEthCRE
     function startGame() external onlyOwner nonReentrant {
         if (gamePhase != GamePhase.PREGAME) revert GameNotActive();
         // [CRE v0.4 / SE-H-01] Require seed deposited before game starts when VC_SEED is set.
@@ -1544,7 +1315,11 @@ uint256 public dormancyParticipantCount;
             // which returns to prizePot at finalize) stays at or above requiredEndPot, but never
             // below breathRailMin. Uses requiredEndPot (now the season-end ENDGAME floor post v1.04
             // split); the live per-draw dormancy protection is handled separately by the DORM-GATE.
-            // NOTE [review pt5]: post-split this clamp is largely vestigial. The DORM-GATE in
+            // NOTE [v1.17 / IC-03]: this clamp is RETAINED. It was annotated "largely vestigial
+            // pending a test proving DORM-GATE precedence", but that test does not exist yet, so
+            // the clamp stays until it does — removing load-bearing-until-proven safety code on a
+            // "probably" is how the bug it prevents gets reintroduced. Test is logged as owed.
+            // Original reasoning: post-split the DORM-GATE in
             // _calculatePrizePools caps draw-1 distribution against the stricter LIVE dormancy-now
             // floor and binds first, so this endgame-floor clamp rarely does anything. Kept as a
             // belt-and-braces backstop (harmless, cheap); a later tidy could remove it once the
@@ -1598,10 +1373,7 @@ uint256 public dormancyParticipantCount;
         emit GameStarted(block.timestamp, totalRegisteredPlayers);
     }
 
-    /// @notice Claims registration refund if the game never started. PREGAME only.
-    ///         If contract balance is insufficient for a full refund (rare: requires
-    ///         large OG cancellations to drain treasury in pregame), refunds are
-    ///         first-come-first-served. The SignupRefund event captures actual vs owed.
+    /// @inheritdoc IBullsEthCRE
     function claimSignupRefund() external nonReentrant {
         if (gamePhase != GamePhase.PREGAME) revert SignupNotFailed();
         if (block.timestamp < signupDeadline) revert TooEarly();
@@ -1684,14 +1456,7 @@ uint256 public dormancyParticipantCount;
         if (committedPlayerCount > 0) committedPlayerCount--;
     }
 
-    /// @notice Removes stale weekly OGs from ogList. Callable by owner, automationForwarder, or
-    ///         creForwarder [CRE v1.0], and reachable via onReport (ACTION_PRUNE = 4).
-    /// @dev [v1.54] M-02 FIX: accessible to automationForwarder as well as owner.
-    ///      Stale OGs each consume one slot of the MAX_MATCH_PER_TX budget per batch
-    ///      without producing match results -- reducing effective throughput per call.
-    ///      Keepers must call this regularly (every draw cycle) to prevent throughput degradation.
-    ///      Risk: if stale OG count approaches MAX_MATCH_PER_TX (500), draws stall.
-    /// @param maxPrune  Maximum number of stale OGs to remove in this call. Must be <= MAX_LAPSE_BATCH (500).
+    /// @inheritdoc IBullsEthCRE
     function pruneStaleOGs(uint256 maxPrune) public {
     // [v2.34 C-01] public not external: performUpkeep() calls this internally (JUMP).
     // external would be a compile error. IMPORTANT: do NOT add nonReentrant to this
@@ -1720,10 +1485,7 @@ uint256 public dormancyParticipantCount;
 
     // ── Ticket buying ─────────────────────────────────────────────────────────
 
-    /// @notice Buys 1 or 2 tickets for the current draw. ACTIVE phase only.
-    /// @dev [v2.15] Treasury rate is flat TREASURY_BPS on all draws. [CRE v0.1] TREASURY_BPS = 2500 (25%).
-    ///      Commitment credit applied at the same flat rate -- no rate asymmetry.
-    /// @param ticketCount  Number of tickets to buy (1 or 2). Weekly OGs must buy 2.
+    /// @inheritdoc IBullsEthCRE
     function buyTickets(uint256 ticketCount) external nonReentrant {
         if (gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -1850,8 +1612,7 @@ uint256 public dormancyParticipantCount;
         emit TicketsBought(msg.sender, currentDraw, ticketCount);
     }
 
-    /// @notice Submits or updates the first prediction for the current draw.
-    /// @param prediction  ETH/USD price prediction in USD cents.
+    /// @inheritdoc IBullsEthCRE
     function submitPrediction(uint256 prediction) external {
         if (gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -1865,12 +1626,7 @@ uint256 public dormancyParticipantCount;
         emit PredictionSubmitted(msg.sender, prediction, currentDraw);
     }
 
-    /// @notice Submits or updates the second prediction for the current draw
-///         (OGs and players who bought 2 tickets this draw). [v2.35 NS-L-02]
-///         After v2.34 M-01, 2-ticket casuals who do not call this function receive
-///         an auto-default second entry at matching time. Frontends should surface
-///         this function to all lastTicketCount>=2 players, not OGs only.
-    /// @param prediction2  Second ETH/USD price prediction in USD cents.
+    /// @inheritdoc IBullsEthCRE
     function submitPrediction2(uint256 prediction2) external {
         if (gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -1886,18 +1642,78 @@ uint256 public dormancyParticipantCount;
 
     // ── Draw resolution & cutoff submission ───────────────────────────────────
 
-    /// @notice Resolves ETH price and transitions to CUTOFF_SUBMISSION.
-    /// @dev    [v1.0] FLOW CHANGE: transitions to CUTOFF_SUBMISSION not MATCHING.
-    ///         Keeper must call submitCutoffDiffs() before processMatches() can run.
-    ///         snapshotTotalEntries captured here for verification.
-    ///         tier1-4Band computation removed. Dynamic cutoffs replace fixed bands.
+    /// @inheritdoc IBullsEthCRE
+    /// @notice [v1.15 / C-01] RESTRICTED fallback settlement. See resolveWeek(uint80) for
+    ///         the normal path. This one reads the feed at whatever instant its caller
+    ///         chooses, which is precisely the optionality C-01 describes, so it is no
+    ///         longer permissionless and is not available until RESOLVE_FALLBACK_DELAY past
+    ///         the scheduled slot. It is retained because the reserve/WETH fallback chain is
+    ///         the feed-failure protection and that must survive. A keeper reaching for this
+    ///         should treat it as an incident, not a routine.
     function resolveWeek() external nonReentrant {
+        if (msg.sender != owner() && msg.sender != automationForwarder && msg.sender != creForwarder)
+            revert OwnableUnauthorizedAccount(msg.sender);
+        if (block.timestamp < lastDrawTimestamp + DRAW_COOLDOWN + RESOLVE_FALLBACK_DELAY) revert TooEarly();
         _resolveWeekCore();
     }
 
-    /// @dev [CRE v1.0] Verbatim v0.14 resolveWeek() body. Called by the external
-    ///      wrapper (permissionless, nonReentrant) and by onReport (nonReentrant).
-    function _resolveWeekCore() internal {
+    /// @notice [v1.15 / C-01] Normal settlement. Permissionless, and the price is a
+    ///         deterministic function of the draw number rather than of when the caller
+    ///         fires the transaction.
+    /// @dev    The caller supplies the FIRST feed round whose updatedAt is at or after the
+    ///         scheduled slot (lastDrawTimestamp + DRAW_COOLDOWN). Exactly one round
+    ///         satisfies that, so every honest caller submits the same one and the settled
+    ///         price is identical regardless of who calls or when. Previously the caller
+    ///         chose the instant and therefore, in a nearest-the-price game, the answer.
+    /// @param  roundId Feed round to settle against. Off-chain: walk back from
+    ///         latestRoundData until updatedAt < slot, then take the round after it.
+    function resolveWeek(uint80 roundId) external nonReentrant {
+        _resolveWeekGate();
+        int256 price = _readPinnedPrice(ethFeed, roundId);
+        if (price <= 0) revert NotEnoughValidPrices();
+        lastValidPrice = price;
+        emit SettlementRoundPinned(currentDraw, roundId, price, lastDrawTimestamp + DRAW_COOLDOWN);
+        _resolveWeekApply(price);
+    }
+
+    /// @dev [v1.15 / C-01] Returns the price of `roundId` only if it is a valid round AND
+    ///      the first one at or after this draw's scheduled slot. Returns 0 otherwise, so
+    ///      the caller cannot settle on a round of their choosing.
+    function _readPinnedPrice(address feedAddr, uint80 roundId) internal view returns (int256) {
+        uint256 slot = lastDrawTimestamp + DRAW_COOLDOWN;
+        AggregatorV3Interface feed = AggregatorV3Interface(feedAddr);
+        try feed.getRoundData(roundId) returns (
+            uint80 rid, int256 price, uint256, uint256 updatedAt, uint80 answeredInRound
+        ) {
+            if (rid != roundId) return 0;
+            if (price <= 0) return 0;
+            if (updatedAt == 0) return 0;
+            if (updatedAt > block.timestamp) return 0;
+            if (updatedAt < slot) return 0;            // round predates the slot
+            if (answeredInRound < rid) return 0;
+            try AggregatorMinMax(feedAddr).minAnswer() returns (int192 mn) { if (price <= int256(mn)) return 0; } catch {}
+            try AggregatorMinMax(feedAddr).maxAnswer() returns (int192 mx) { if (mx > 0 && price >= int256(mx)) return 0; } catch {}
+
+            // Firstness. If an earlier round already satisfies the slot, this one is not it.
+            bool provedFirst = false;
+            if (roundId > 0) {
+                try feed.getRoundData(roundId - 1) returns (uint80, int256, uint256, uint256 prevUpdatedAt, uint80) {
+                    if (prevUpdatedAt != 0) {
+                        if (prevUpdatedAt >= slot) return 0;   // an earlier qualifying round exists
+                        provedFirst = true;
+                    }
+                } catch {}
+            }
+            // Could not prove firstness: on a Chainlink proxy roundId packs a phaseId, so
+            // roundId - 1 across an aggregator upgrade is not the previous round. Fall back
+            // to a bounded window, which limits the residual choice rather than removing it.
+            if (!provedFirst && updatedAt > slot + PINNED_ROUND_TOLERANCE) return 0;
+            return price;
+        } catch { return 0; }
+    }
+
+    /// @dev [v1.15 / C-01] Gating shared by both settlement paths.
+    function _resolveWeekGate() internal {
         if (gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
         if (block.timestamp < lastDrawTimestamp + DRAW_COOLDOWN) revert CooldownActive();
@@ -1906,6 +1722,12 @@ uint256 public dormancyParticipantCount;
         if (weeklyNonOGPlayers.length == 0 && totalOGs == 0) revert NotEnoughPlayers();
         _checkSequencer();
         _captureYieldAndCheck();
+    }
+
+    /// @dev [CRE v1.0] Verbatim v0.14 resolveWeek() body. Called by the external
+    ///      wrapper (permissionless, nonReentrant) and by onReport (nonReentrant).
+    function _resolveWeekCore() internal {
+        _resolveWeekGate();
         int256 currentPrice = _readEthPrice();
         if (currentPrice > 0) { lastValidPrice = currentPrice; }
         else {
@@ -1920,6 +1742,12 @@ uint256 public dormancyParticipantCount;
             if (currentPrice == 0 && lastValidPrice > 0) { emit FeedStaleFallback(); currentPrice = lastValidPrice; }
             if (currentPrice == 0) revert NotEnoughValidPrices();
         }
+        _resolveWeekApply(currentPrice);
+    }
+
+    /// @dev [v1.15 / C-01] Everything after the price is settled. Shared by the pinned and
+    ///      fallback paths so the two can never diverge on what a resolution does.
+    function _resolveWeekApply(int256 currentPrice) internal {
         // [v1.77] autoDefaultCents uses the PREVIOUS draw's resolvedPrice (one-draw lag).
         // Intentional: the last resolved price is the best on-chain reference at draw start.
         if (resolvedPrice > 0) {
@@ -1944,6 +1772,7 @@ uint256 public dormancyParticipantCount;
         drawPhase = DrawPhase.CUTOFF_SUBMISSION; phaseStartTimestamp = block.timestamp;
         matchOGIndex = 0; matchNonOGIndex = 0; ogMatchingDone = false; currentTierPerWinner = 0;
         t1CutoffDiff = 0; t2CutoffDiff = 0; t3CutoffDiff = 0;
+        cutoffAttempts = 0; // [v1.14 / H-01] fresh draw, fresh attempt budget
         // [v1.0] Assembly clears: p4Winners.slot REMOVED (p4Winners does not exist).
         assembly { sstore(jpWinners.slot, 0) sstore(p2Winners.slot, 0) sstore(p3Winners.slot, 0) }
         emit DrawResolved(currentDraw, currentPrice);
@@ -2021,7 +1850,7 @@ uint256 public dormancyParticipantCount;
         emit CutoffDiffsSubmitted(currentDraw, _t1CutoffDiff, _t2CutoffDiff, _t3CutoffDiff, _t1Count, _t2Count, _t3Count);
     }
 
-    /// @notice Runs the prize matching pass for the current draw. Callable by keeper or owner.
+    /// @inheritdoc IBullsEthCRE
     function processMatches() external nonReentrant {
         if (drawPhase != DrawPhase.MATCHING) revert WrongPhase();
         _processMatchesCore();
@@ -2053,15 +1882,42 @@ uint256 public dormancyParticipantCount;
                 }
                 bool isActive = p.isUpfrontOG || (p.isWeeklyOG && !p.weeklyOGStatusLost);
                 if (isActive) {
-                    bool predictionFresh = (p.predictionDraw == currentDraw);
+                    // [v1.14 / H-01] STANDING PREDICTION. A player's number now stands until
+                    // they change it. Previously a stale prediction was OVERWRITTEN with a single
+                    // global auto-default, so every non-resubmitting player in the draw was
+                    // assigned the identical value, tied at an identical diff, and admitted or
+                    // excluded as one block by the inclusive tier thresholds. A cohort larger than
+                    // T1_COUNT_MAX_BPS landing near the settled price made the draw structurally
+                    // unresolvable: no cutoff triple existed, not even t1CutoffDiff = 0. Rolling
+                    // the player's own stored prediction forward removes the mechanical collision,
+                    // because those numbers are already spread. The global default now applies only
+                    // to a player who has never submitted at all, which is close to unreachable:
+                    // payCommitment, payCommitmentDouble, registerAsOG and registerAsWeeklyOG all
+                    // set and validate a non-zero prediction on entry.
                     uint256 effectivePrediction;
-                    if (predictionFresh && p.prediction != 0) { effectivePrediction = p.prediction; }
-                    else { effectivePrediction = autoDefault; p.prediction = autoDefault; p.predictionDraw = currentDraw; emit AutoPredictionApplied(addr, currentDraw, autoDefault); }
+                    if (p.prediction != 0) {
+                        effectivePrediction = p.prediction;
+                        if (p.predictionDraw != currentDraw) {
+                            p.predictionDraw = currentDraw;
+                            emit AutoPredictionApplied(addr, currentDraw, effectivePrediction);
+                        }
+                    } else {
+                        effectivePrediction = autoDefault; p.prediction = autoDefault; p.predictionDraw = currentDraw;
+                        emit AutoPredictionApplied(addr, currentDraw, autoDefault);
+                    }
                     _matchAndCategorize(addr, effectivePrediction);
-                    bool prediction2Fresh = (p.prediction2Draw == currentDraw);
+                    // [v1.14 / H-01] Standing prediction, second entry. Same rule as above.
                     uint256 effectivePrediction2;
-                    if (prediction2Fresh && p.prediction2 != 0) { effectivePrediction2 = p.prediction2; }
-                    else { effectivePrediction2 = autoDefault; p.prediction2 = autoDefault; p.prediction2Draw = currentDraw; emit AutoPrediction2Applied(addr, currentDraw, autoDefault); }
+                    if (p.prediction2 != 0) {
+                        effectivePrediction2 = p.prediction2;
+                        if (p.prediction2Draw != currentDraw) {
+                            p.prediction2Draw = currentDraw;
+                            emit AutoPrediction2Applied(addr, currentDraw, effectivePrediction2);
+                        }
+                    } else {
+                        effectivePrediction2 = autoDefault; p.prediction2 = autoDefault; p.prediction2Draw = currentDraw;
+                        emit AutoPrediction2Applied(addr, currentDraw, autoDefault);
+                    }
                     _matchAndCategorize(addr, effectivePrediction2);
                 }
                 matchOGIndex++; processed++;
@@ -2072,16 +1928,30 @@ uint256 public dormancyParticipantCount;
             uint256 nonOGTotal = weeklyNonOGPlayers.length;
             while (matchNonOGIndex < nonOGTotal && processed < MAX_MATCH_PER_TX) {
                 address addr = weeklyNonOGPlayers[matchNonOGIndex]; PlayerData storage p = players[addr];
+                // [v1.14 / H-01] Standing prediction, casual path. Same rule as the OG path.
                 uint256 casualPrediction;
-                if (p.predictionDraw == currentDraw && p.prediction != 0) { casualPrediction = p.prediction; }
-                else { casualPrediction = autoDefault; p.prediction = autoDefault; p.predictionDraw = currentDraw; emit AutoPredictionApplied(addr, currentDraw, autoDefault); }
+                if (p.prediction != 0) {
+                    casualPrediction = p.prediction;
+                    if (p.predictionDraw != currentDraw) {
+                        p.predictionDraw = currentDraw;
+                        emit AutoPredictionApplied(addr, currentDraw, casualPrediction);
+                    }
+                } else {
+                    casualPrediction = autoDefault; p.prediction = autoDefault; p.predictionDraw = currentDraw;
+                    emit AutoPredictionApplied(addr, currentDraw, autoDefault);
+                }
                 _matchAndCategorize(addr, casualPrediction);
                 if (p.lastTicketCount >= 2) {
                     // [v2.34 M-01] Always give 2-ticket casuals a second entry.
                     // Auto-default if prediction2 not submitted (mirrors OG path).
+                    // [v1.14 / H-01] Standing prediction, casual second entry.
                     uint256 effective2;
-                    if (p.prediction2Draw == currentDraw && p.prediction2 != 0) {
+                    if (p.prediction2 != 0) {
                         effective2 = p.prediction2;
+                        if (p.prediction2Draw != currentDraw) {
+                            p.prediction2Draw = currentDraw;
+                            emit AutoPrediction2Applied(addr, currentDraw, effective2);
+                        }
                     } else {
                         effective2 = autoDefault;
                         p.prediction2 = autoDefault;
@@ -2115,6 +1985,12 @@ uint256 public dormancyParticipantCount;
                                  || (a123Bps< T3_COUNT_MIN_BPS || a123Bps> T3_COUNT_MAX_BPS);
                     if (mismatch) {
                         emit MatchCountMismatch(currentDraw, t1Actual, t12Actual, t123Actual, snapshotTotalEntries);
+                        // [v1.14 / H-01] Count the bounce so an unsatisfiable draw cannot be held
+                        // open forever by repeated good-faith resubmission.
+                        cutoffAttempts++;
+                        if (cutoffAttempts >= MAX_CUTOFF_ATTEMPTS) {
+                            emit CutoffAttemptsExhausted(currentDraw, cutoffAttempts);
+                        }
                         // Reset cutoffs and winner state. tierPools and currentDrawSeedReturn
                         // are left intact -- they were correctly calculated in resolveWeek()
                         // and remain allocated for the next matching pass with corrected cutoffs.
@@ -2158,6 +2034,24 @@ uint256 public dormancyParticipantCount;
                         uint256 _cap = VC_SEED * MAX_SEED_PER_DRAW_BPS / 10000;
                         if (_extra > _unspent) _extra = _unspent;
                         if (_extra > _cap)     _extra = _cap;
+                        // [v1.13 / H-02] RATIO CEILING. The constructor VC-SPENT-CAP guard proves
+                        // solvency only under the assumption that
+                        //   seedReleased <= cumulativeSeasonTreasury * MAX_SEED_RELEASE_RATIO_BPS / 10000
+                        // The supplement path in _calculatePrizePools() obeys that bound. This top-up
+                        // did not: bounded only by unspent seed, the per-draw cap and prizePot, it
+                        // could release seed in the earliest draws against a season treasury of zero,
+                        // making _vcTreasuryObligation() exceed treasuryBalance and silently short the
+                        // VC at settlement. Clamping to the same ceiling restores the invariant the
+                        // constructor advertises. CONSEQUENCE, stated openly: because
+                        // cumulativeSeasonTreasury only accrues on real ticket transfers, this
+                        // materially reduces or removes the cold-start floor in draw 1 (where buys are
+                        // covered by pregame commitment credit). That is the honest position: a
+                        // cold-start subsidy cannot be funded from a return obligation the season has
+                        // not yet earned the treasury to service. A genuine cold-start fund must be a
+                        // separate, explicitly non-returnable tranche excluded from the obligation.
+                        uint256 _ratioCap  = cumulativeSeasonTreasury * MAX_SEED_RELEASE_RATIO_BPS / 10000;
+                        uint256 _headroom  = _ratioCap > _releasedSoFar ? _ratioCap - _releasedSoFar : 0;
+                        if (_extra > _headroom) _extra = _headroom;
                         if (_extra > prizePot) _extra = prizePot;
                         if (_extra > 0) {
                             prizePot     -= _extra;
@@ -2182,14 +2076,7 @@ uint256 public dormancyParticipantCount;
 
     // ── Chainlink Automation ──────────────────────────────────────────────────
 
-    /// @dev [v1.54] L-02 FIX: address(0) permitted to DISABLE automation forwarder.
-    ///      Use during key compromise recovery -- disables performUpkeep/submitCutoffDiffs
-    ///      from the compromised key until a replacement is set. Manual keeper calls still work.
-    ///      INCIDENT RUNBOOK [CRE v1.0 / seam L-01]: as of the CRE seam there are TWO delivery
-    ///      paths. Revoking keeper access on a compromise now requires zeroing BOTH:
-    ///      setAutomationForwarder(address(0)) AND setCreForwarder(address(0)). Zeroing only one
-    ///      leaves the other live. After both are zeroed the owner submits cutoffs directly.
-    /// @param forwarder  New automation forwarder address. address(0) disables automation.
+    /// @inheritdoc IBullsEthCRE
     function setAutomationForwarder(address forwarder) external onlyOwner {
         if (forwarder == address(this)) revert InvalidAddress();
         if (forwarder == USDC) revert InvalidAddress();                // [v1.55] L-NEW-02
@@ -2200,10 +2087,7 @@ uint256 public dormancyParticipantCount;
         emit AutomationForwarderSet(forwarder);
     }
 
-    /// @notice Sets the CRE delivery address. Owner only. address(0) disables CRE.
-    /// @dev Mirrors setAutomationForwarder's blocklist. Set to the KeystoneForwarder
-    ///      (native onReport) or a deployed AutomationReceiver (translation route).
-    /// @param forwarder  New CRE delivery address. address(0) disables.
+    /// @inheritdoc IBullsEthCRE
     function setCreForwarder(address forwarder) external onlyOwner {
         if (forwarder == address(this))        revert InvalidAddress();
         if (forwarder == USDC)                 revert InvalidAddress();
@@ -2220,18 +2104,30 @@ uint256 public dormancyParticipantCount;
             address addr = players_[i];
             PlayerData storage p = players[addr];
             if (p.lastBoughtDraw != currentDraw) continue;
-            if (p.predictionDraw == currentDraw && p.prediction != 0) continue;
-            p.prediction = autoDefault; p.predictionDraw = currentDraw;
-            emit AutoPredictionApplied(addr, currentDraw, autoDefault);
-            if (p.lastTicketCount >= 2 && !(p.prediction2Draw == currentDraw && p.prediction2 != 0)) {
-                p.prediction2 = autoDefault; p.prediction2Draw = currentDraw;
-                emit AutoPrediction2Applied(addr, currentDraw, autoDefault);
+            // [v1.14 / H-01] Mirrors the standing-prediction rule in _processMatchesCore so the
+            // pre-pass and matching can never disagree about a player's effective number.
+            if (p.predictionDraw != currentDraw) {
+                if (p.prediction != 0) {
+                    p.predictionDraw = currentDraw;
+                    emit AutoPredictionApplied(addr, currentDraw, p.prediction);
+                } else {
+                    p.prediction = autoDefault; p.predictionDraw = currentDraw;
+                    emit AutoPredictionApplied(addr, currentDraw, autoDefault);
+                }
+            }
+            if (p.lastTicketCount >= 2 && p.prediction2Draw != currentDraw) {
+                if (p.prediction2 != 0) {
+                    p.prediction2Draw = currentDraw;
+                    emit AutoPrediction2Applied(addr, currentDraw, p.prediction2);
+                } else {
+                    p.prediction2 = autoDefault; p.prediction2Draw = currentDraw;
+                    emit AutoPrediction2Applied(addr, currentDraw, autoDefault);
+                }
             }
         }
     }
 
-    /// @notice Applies auto-default predictions to a batch of players for the current draw.
-    /// @param players_  Array of player addresses to apply auto-default to.
+    /// @inheritdoc IBullsEthCRE
     function applyAutoPicksForDraw(address[] calldata players_) external nonReentrant {
         if (msg.sender != owner() && msg.sender != automationForwarder && msg.sender != creForwarder)
             revert OwnableUnauthorizedAccount(msg.sender); // [CRE v1.0] auth site 3/5
@@ -2241,19 +2137,7 @@ uint256 public dormancyParticipantCount;
         _applyAutoPredictions(players_);
     }
 
-    /// @notice Chainlink Automation compatibility. Returns upkeepNeeded and encoded action.
-    ///         Action 1: advance draw phase (MATCHING/DISTRIBUTING/FINALIZING/UNWINDING).
-    ///         Action 2: apply auto-picks before PICK_DEADLINE.
-    ///         Action 3: prune stale OGs (fires when stale count >= STALE_OG_PRUNE_THRESHOLD). [v1.55]
-    ///         CUTOFF_SUBMISSION is never returned as upkeepNeeded -- keeper submits diffs directly.
-    /// @dev ACTION-2 NOTE: action 2 is a TIMING SIGNAL. Automation passes back abi.encode(uint8(2))
-    ///      (32 bytes, no player list). performUpkeep handles this gracefully as a no-op.
-    ///      To force-apply auto-picks for specific players, call applyAutoPicksForDraw() directly.
-    /// @dev [v1.1] CUTOFF_SUBMISSION phase: returns (false, "") not (true, action1).
-    ///      Chainlink Automation cannot advance CUTOFF_SUBMISSION -- calling performUpkeep
-    ///      reverts DrawNotProgressing, which would burn LINK on every retry for 48h.
-    ///      Keeper detects drawPhase == CUTOFF_SUBMISSION from on-chain state,
-    ///      computes cutoff diffs off-chain, calls submitCutoffDiffs() directly.
+    /// @inheritdoc IBullsEthCRE
     function checkUpkeep(bytes calldata) external view returns (bool upkeepNeeded, bytes memory performData) {
         if (gamePhase != GamePhase.ACTIVE) return (false, "");
         // [v1.1] L-01 fix: return false for CUTOFF_SUBMISSION -- automation cannot advance this phase.
@@ -2272,8 +2156,7 @@ uint256 public dormancyParticipantCount;
         return (false, "");
     }
 
-    /// @notice Chainlink Automation entry point. Executes the scheduled upkeep action.
-    /// @param performData  ABI-encoded uint8 action code from checkUpkeep.
+    /// @inheritdoc IBullsEthCRE
     function performUpkeep(bytes calldata performData) external nonReentrant {
         if (msg.sender != owner() && msg.sender != automationForwarder && msg.sender != creForwarder)
             revert OwnableUnauthorizedAccount(msg.sender); // [CRE v1.0] auth site 4/5
@@ -2314,19 +2197,30 @@ uint256 public dormancyParticipantCount;
 
     // ── [CRE v1.0] CRE report delivery ───────────────────────────────────────
 
-    /// @notice Chainlink CRE delivery entry point. Called by the KeystoneForwarder
-    ///         after DON signature verification. Routes to INTERNAL cores.
-    /// @dev holds nonReentrant; routed targets must not also hold it. pruneStaleOGs
-    ///      is public with an auth guard that ACCEPTS creForwarder; the internal call preserves
-    ///      msg.sender == creForwarder, which its auth accepts. metadata is unread
-    ///      in v1.0 (forwarder gate is the trust root). Unknown action -> UnknownAction.
-    /// @param report  abi.encode(uint8 action, bytes payload).
+    /// @inheritdoc IBullsEthCRE
     function onReport(bytes calldata /* metadata */, bytes calldata report) external nonReentrant {
         if (creForwarder == address(0) || msg.sender != creForwarder)
             revert OwnableUnauthorizedAccount(msg.sender);
         (uint8 action, bytes memory payload) = abi.decode(report, (uint8, bytes));
         if (action == ACTION_RESOLVE_WEEK) {
-            _resolveWeekCore();
+            // [v1.15 / C-01] Prefer the pinned path. A payload carrying a roundId settles
+            // deterministically; an empty payload falls back to the spot read, which is
+            // still gated by RESOLVE_FALLBACK_DELAY inside _resolveWeekCore's caller path
+            // only, so CRE retains the feed-failure escape without the routine optionality.
+            // [v1.17 / M-01] CRE MUST PIN. The prior code fell back to _resolveWeekCore()
+            // (a spot read) when the payload was under 32 bytes. That reintroduced the exact
+            // caller-picks-the-instant optionality C-01 removed, just behind the forwarder and
+            // with NO RESOLVE_FALLBACK_DELAY, and an inline comment wrongly described it as
+            // delay-gated. The spot fallback belongs only on the restricted, delayed no-arg
+            // resolveWeek(). A CRE report that wants to settle must carry a roundId.
+            if (payload.length < 32) revert NotEnoughValidPrices();
+            uint80 rid = abi.decode(payload, (uint80));
+            _resolveWeekGate();
+            int256 p = _readPinnedPrice(ethFeed, rid);
+            if (p <= 0) revert NotEnoughValidPrices();
+            lastValidPrice = p;
+            emit SettlementRoundPinned(currentDraw, rid, p, lastDrawTimestamp + DRAW_COOLDOWN);
+            _resolveWeekApply(p);
         } else if (action == ACTION_SUBMIT_CUTOFFS) {
             (uint256 d1, uint256 d2, uint256 d3, uint256 c1, uint256 c2, uint256 c3)
                 = abi.decode(payload, (uint256, uint256, uint256, uint256, uint256, uint256));
@@ -2378,7 +2272,7 @@ uint256 public dormancyParticipantCount;
 
     // ── Prize distribution ────────────────────────────────────────────────────
 
-    /// @notice Runs the prize distribution pass for the current draw. Callable by anyone.
+    /// @inheritdoc IBullsEthCRE
     function distributePrizes() external nonReentrant {
         if (gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (drawPhase != DrawPhase.DISTRIBUTING) revert WrongPhase();
@@ -2423,7 +2317,7 @@ uint256 public dormancyParticipantCount;
         }
     }
 
-    /// @notice Finalises the current draw. Advances to the next draw or closes the game.
+    /// @inheritdoc IBullsEthCRE
     function finalizeWeek() external nonReentrant {
         bool isResetFinalize = (drawPhase == DrawPhase.RESET_FINALIZING);
         if (!isResetFinalize && drawPhase != DrawPhase.FINALIZING) revert WrongPhase();
@@ -2471,6 +2365,7 @@ uint256 public dormancyParticipantCount;
         currentDrawT3FloorTopup = 0;   // [CRE v1.10] cleared each draw (paired deferral)
         // [v1.0] Reset cutoff state and snapshot after each draw completes.
         t1CutoffDiff = 0; t2CutoffDiff = 0; t3CutoffDiff = 0; snapshotTotalEntries = 0;
+        cutoffAttempts = 0; // [v1.14 / H-01]
         // [v1.58-P3] obligationLocked always true from draw 1. Guard simplified.
         if (currentDraw == BREATH_CALIBRATION_DRAW) { _calibrateBreathTarget(); }
         // [v1.58-P3] obligationLocked always true from draw 1 -- guard is retained
@@ -2500,9 +2395,7 @@ uint256 public dormancyParticipantCount;
         currentDraw++; drawPhase = DrawPhase.IDLE;
     }
 
-    /// @notice Permissionless draw step progression.
-    /// @dev    [v1.0] CUTOFF_SUBMISSION cannot auto-advance (requires keeper computation).
-    ///         Returns DrawNotProgressing for that phase.
+    /// @inheritdoc IBullsEthCRE
     function completeDrawStep() external nonReentrant {
         if (gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (drawPhase == DrawPhase.CUTOFF_SUBMISSION) revert DrawNotProgressing();
@@ -2517,23 +2410,7 @@ uint256 public dormancyParticipantCount;
     // ── Game close, dormancy, refunds ─────────────────────────────────────────
     // NOTE [v1.57-P2]: closeGame() was changed. maxPerOG now uses targetReturnBps.
 
-    /// @notice Settles the game. Distributes endgame pot to qualified OGs.
-    ///         perOGPromised = OG_UPFRONT_COST * avgTargetReturnBps / 10000
-    ///         where avgTargetReturnBps is derived from the season-average OG ratio.
-    ///         Callable by owner, automationForwarder, or creForwarder [CRE v1.0], and reachable
-    ///         via onReport (ACTION_CLOSE_GAME = 5).
-    /// @dev [v1.57-P2] OG endgame cap is targetReturnBps% of cost, not full cost.
-    ///      Surplus above the cap goes to treasury. Shortfall emits EndgameShortfall.
-    /// @dev [v1.59] perOGPromised uses season-average OG ratio across non-reset draws.
-    ///      Prevents a late-game ratio spike from retroactively cutting OG returns.
-    ///      Reset-finalize draws excluded. Draw 30 also excluded from accumulator
-    ///      (v2.30 SSoT guard) -- only draws 1-29 are counted. See the ogRatioDrawCount dev-note.
-    ///      NOTE: P3 solvency check targets pot adequacy for draw-1 targetReturnBps only.
-    ///      If the OG ratio drops mid-season (fewer OGs stay), avgTargetReturnBps rises
-    ///      above the draw-1 value (lower ratio = higher return per P2 curve).
-    ///      Extra casual revenue from the ratio drop typically funds the difference,
-    ///      but this is not guaranteed by mathematical proof. See deployment documentation.
-    ///      Falls back to live ratio if accumulator is zero (should never occur).
+    /// @inheritdoc IBullsEthCRE
     function closeGame() external nonReentrant {
         if (msg.sender != owner() && msg.sender != automationForwarder && msg.sender != creForwarder)
             revert OwnableUnauthorizedAccount(msg.sender); // [CRE v1.0] auth site 2/5 -- M-01 fix
@@ -2546,6 +2423,25 @@ uint256 public dormancyParticipantCount;
         if (gamePhase != GamePhase.CLOSED) revert GameNotClosed();
         if (gameSettled) revert GameAlreadyClosed();
         _captureYield();
+
+        // [v1.14 / H-04] SENIOR TIER FIRST. activateDormancy() carves unreleased VC seed as
+        // TIER 0, above the OG pool. closeGame() previously paid OGs out of prizePot first and
+        // only then looked for the seed, so on the shortfall branch (rawPerOG <= maxPerOG, where
+        // dust is rounding remainder only) the seed that the draw-30 holdback deliberately
+        // reserved inside prizePot was paid out to OGs and the VC fell back on an unreserved
+        // treasury. Two exits from the same building with opposite instructions on the wall.
+        // Taking the seed here, before qualifiedOGs is read, is what makes the draw-30
+        // reservation actually hold, and makes both settlement paths agree.
+        // DISCLOSURE, decided 23 Jul 2026: on a completed but underperforming season the OG
+        // return may be reduced to protect investor principal. EndgameShortfall already fires
+        // for that case. It must be stated in the OG terms, not left implied by the code.
+        uint256 _unreleasedAtClose = VC_SEED > seedReleased ? VC_SEED - seedReleased : 0;
+        uint256 _vcFromPot = _unreleasedAtClose <= prizePot ? _unreleasedAtClose : prizePot;
+        if (_vcFromPot > 0) {
+            prizePot     -= _vcFromPot;
+            vcReturnOwed += _vcFromPot;
+        }
+
         uint256 qualifiedOGs = _countQualifiedOGs();
         uint256 surplusToTreasury; // [v2.05] track actual surplus for GameClosed event
         // [v1.59] Use season-average OG ratio to compute perOGPromised.
@@ -2596,7 +2492,10 @@ uint256 public dormancyParticipantCount;
         // enough to source the VC return. If the holdback formula in _calculatePrizePools() changes
         // without updating this reservation, the VC return silently underfunds. Review both together.
         if (VC_SEED > 0) {
-            uint256 _unreleasedSeed = VC_SEED > seedReleased ? VC_SEED - seedReleased : 0;
+            // [v1.14 / H-04] Only the portion the pot could NOT cover. _vcFromPot was already
+            // moved to vcReturnOwed above; recomputing the full unreleased figure here would
+            // pay the VC twice.
+            uint256 _unreleasedSeed = _unreleasedAtClose > _vcFromPot ? _unreleasedAtClose - _vcFromPot : 0;
             if (_unreleasedSeed > 0) {
                 uint256 _fromSurplus = _unreleasedSeed <= surplusToTreasury ? _unreleasedSeed : surplusToTreasury;
                 if (_fromSurplus > 0) { treasuryBalance -= _fromSurplus; vcReturnOwed += _fromSurplus; }
@@ -2626,24 +2525,7 @@ uint256 public dormancyParticipantCount;
 
     // ── [CRE v0.1 / SmartEarn] VC return and seed governance ──────────────────
 
-    /// @notice Claims VC principal return + SmartEarn bonus after settlement. Routes to
-    ///         VC_SEED_RETURN_ADDRESS (immutable). FULLY PERMISSIONLESS [CRE v1.0 / B-L-02]:
-    ///         anyone may call the moment the game is settled. No owner gate and no time gate.
-    ///         (Supersedes the v0.14 owner-any-time / anyone-after-180-day design; the old
-    ///         ENDGAME_SWEEP_WINDOW gate no longer applies to this function.)
-    ///         vcReturnOwed is set by closeGame() or sweepDormancyRemainder().
-    /// @dev    [CRE v1.0 / B-L-02] The destination is immutable and the amount deterministic, so
-    ///         any auth added a liveness dependency (owner key loss would permanently strand
-    ///         vcReturnOwed — no sweep includes it) without any security benefit (funds can ONLY
-    ///         ever go to VC_SEED_RETURN_ADDRESS). Making it fully permissionless from settlement
-    ///         means nobody — including the operator — can withhold the investor's principal, and
-    ///         it removes the 180-day wait that the earlier fallback imposed. Same anti-lock
-    ///         rationale as the permissionless sweeps.
-    /// @dev    [CRE v0.6 / INFO-02] On the dormancy (emergency shutdown) path, vcReturnOwed
-    ///         is not set until sweepDormancyRemainder(), which requires the full 90-day
-    ///         DORMANCY_CLAIM_WINDOW to elapse. The dormancyVCPool senior tier is reserved at
-    ///         activateDormancy() but is not payable here until that window closes. The VC
-    ///         should expect a minimum 90-day wait for principal on an early shutdown.
+    /// @inheritdoc IBullsEthCRE
     function claimVCReturn() external nonReentrant {
         // [CRE v1.0 / B-L-02] Fully permissionless. Destination immutable, amount
         // deterministic, so no auth or time-gate is needed (supersedes v0.14's
@@ -2657,15 +2539,7 @@ uint256 public dormancyParticipantCount;
         emit VCReturnClaimed(_amount);
     }
 
-    /// @notice Proposes a new seedReleaseRatioBps. Executes after SEED_RATIO_TIMELOCK (7 days).
-    ///         0 = pause all seed release. MAX_SEED_RELEASE_RATIO_BPS is the hard cap at deploy.
-    /// @dev    [CRE v0.10 / NS-L-01] PHASE GATES: callable only in ACTIVE + IDLE (not PREGAME,
-    ///         DORMANT, or CLOSED, and not mid-draw). EFFECTIVE TIMING: the 7-day timelock means a
-    ///         ratio proposed at season start cannot take effect until roughly draw 3-4 (draw cadence
-    ///         dependent), so the earliest seed supplement a governance change enables is that draw,
-    ///         not draw 1. Material to SmartEarn/VC term sheets: the VC cannot rely on a ratio change
-    ///         landing sooner than the timelock permits. A pending proposal is auto-cancelled by
-    ///         proposeDormancy() [D-L-01].
+    /// @inheritdoc IBullsEthCRE
     function proposeSeedReleaseRatio(uint256 newRatio) external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert WrongPhase();
         if (drawPhase != DrawPhase.IDLE)   revert DrawInProgress();
@@ -2677,12 +2551,7 @@ uint256 public dormancyParticipantCount;
         emit SeedReleaseRatioProposed(newRatio, seedReleaseRatioEffectiveTime);
     }
 
-    /// @notice Executes a pending seedReleaseRatioBps change after the timelock.
-    /// @dev    [CRE v0.11 / D4-I-01] ACTIVE + IDLE gates added for uniformity with sibling execute
-    ///         functions. Execution outside ACTIVE was harmless (seedReleaseRatioBps is read once
-    ///         per draw in _calculatePrizePools(), effective next draw), but the asymmetry was a
-    ///         review flag. cancelSeedReleaseRatio() intentionally stays ungated (cancel must work
-    ///         in any phase, e.g. after proposeDormancy() has moved the game toward DORMANT).
+    /// @inheritdoc IBullsEthCRE
     function executeSeedReleaseRatio() external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert WrongPhase();
         if (drawPhase != DrawPhase.IDLE)   revert DrawInProgress();
@@ -2695,7 +2564,7 @@ uint256 public dormancyParticipantCount;
         emit SeedReleaseRatioExecuted(_old, seedReleaseRatioBps);
     }
 
-    /// @notice Cancels a pending seedReleaseRatioBps proposal.
+    /// @inheritdoc IBullsEthCRE
     function cancelSeedReleaseRatio() external onlyOwner {
         if (seedReleaseRatioEffectiveTime == 0) revert NoTimelockPending();
         emit SeedReleaseRatioCancelled(pendingSeedReleaseRatioBps);
@@ -2703,9 +2572,7 @@ uint256 public dormancyParticipantCount;
         seedReleaseRatioEffectiveTime = 0;
     }
 
-    /// @notice Claims the OG endgame payout after closeGame(). Capped at the targeted
-    ///         return; may be reduced on shortfall (EndgameShortfall event). [v2.27]
-    ///         "Guaranteed" language removed -- v1.63 swept this but this @notice survived.
+    /// @inheritdoc IBullsEthCRE
     function claimEndgame() external nonReentrant {
         if (dormancyTimestamp > 0) revert NothingToClaim();
         PlayerData storage p = players[msg.sender];
@@ -2737,11 +2604,7 @@ uint256 public dormancyParticipantCount;
         emit EndgameClaimed(msg.sender, endgamePerOG);
     }
 
-    /// @notice Sweeps unclaimed endgame payouts to the protocol beneficiary after claim window. Owner only.
-    /// @dev    Callable once block.timestamp >= settlementTimestamp + ENDGAME_SWEEP_WINDOW
-    ///         (180 days). settlementTimestamp is set by closeGame(), sweepDormancyRemainder(),
-    ///         or sweepFailedPregame() -- whichever first transitions game to CLOSED.
-    ///         After this call swept endgame amounts are unrecoverable by individual OGs.
+    /// @inheritdoc IBullsEthCRE
     function sweepUnclaimedEndgame() external onlyOwner nonReentrant {
         if (!gameSettled) revert GameNotClosed();
         if (block.timestamp < settlementTimestamp + ENDGAME_SWEEP_WINDOW) revert TooEarly();
@@ -2751,13 +2614,7 @@ uint256 public dormancyParticipantCount;
         emit UnclaimedFundsSwept("unclaimedEndgame", amount);
     }
 
-    /// @notice Sweeps unclaimed draw prizes to the protocol beneficiary after claim window. Owner only.
-    /// @dev    Callable once block.timestamp >= settlementTimestamp + ENDGAME_SWEEP_WINDOW
-    ///         (180 days). settlementTimestamp is set by closeGame(), sweepDormancyRemainder(),
-    ///         or sweepFailedPregame() -- whichever first transitions game to CLOSED.
-    ///         Sets prizesSweepComplete=true permanently. After this call individual
-    ///         p.unclaimedPrizes balances remain non-zero on-chain but are unclaimable.
-    ///         See also: claimPrize() @dev warning.
+    /// @inheritdoc IBullsEthCRE
     function sweepUnclaimedPrizes() external onlyOwner nonReentrant {
         if (!gameSettled) revert GameNotClosed();
         if (block.timestamp < settlementTimestamp + ENDGAME_SWEEP_WINDOW) revert TooEarly();
@@ -2768,7 +2625,7 @@ uint256 public dormancyParticipantCount;
         emit UnclaimedFundsSwept("unclaimedPrizes", amount);
     }
 
-    /// @notice Proposes emergency dormancy activation with 24h timelock (DORMANCY_TIMELOCK). Owner only.
+    /// @inheritdoc IBullsEthCRE
     function proposeDormancy() external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -2799,13 +2656,13 @@ uint256 public dormancyParticipantCount;
         emit DormancyProposed(dormancyEffectiveTime);
     }
 
-    /// @notice Cancels a pending dormancy proposal. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function cancelDormancy() external onlyOwner {
         if (dormancyEffectiveTime == 0) revert NoTimelockPending();
         dormancyEffectiveTime = 0; emit DormancyCancelled();
     }
 
-    /// @notice Executes dormancy after the 24h timelock (DORMANCY_TIMELOCK). Distributes all funds. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function activateDormancy() external onlyOwner nonReentrant {
         if (gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -2941,21 +2798,7 @@ uint256 public dormancyParticipantCount;
         emit DormancyClaimDeadline(block.timestamp + DORMANCY_CLAIM_WINDOW);
     }
 
-    /// @notice Claims dormancy refund for the caller. DORMANT phase only.
-    /// @dev [v2.15] Casual ticket refund uses flat TREASURY_BPS on all draws. [CRE v0.1] 25%.
-    ///      Commitment-only path also uses flat TREASURY_BPS -- commitment was paid pre-game.
-    ///      Status-lost weekly OGs who did not re-enter as casuals this draw are not
-    ///      eligible for any dormancy pool. Their OG principal was redistributed to
-    ///      the prize pot at the draw they lost status. This is intentional -- the
-    ///      commitment mechanic does not protect players who chose to stop participating.
-    ///      IMPORTANT: Casuals who did not buy tickets in the CURRENT draw at dormancy
-    ///      activation are also NOT eligible for refund -- even if they bought in prior
-    ///      draws. Only current-draw buyers appear in weeklyNonOGPlayers. Prior-draw
-    ///      contributions remain in the pot. This is intentional design.
-    /// @dev [v2.05] p.commitmentPaid is NOT cleared during the casual path while a live
-    ///      commitmentRefundPool exists (cleared only when pool == 0 or deadline expired).
-    ///      Preserves the player's claimCommitmentRefund() entitlement on an overlapping
-    ///      dormancy claim. Without this gate the commitment deposit would be stranded.
+    /// @inheritdoc IBullsEthCRE
     function claimDormancyRefund() external nonReentrant {
         if (gamePhase == GamePhase.CLOSED) { if (dormancyTimestamp > 0) revert DormancyWindowExpired(); revert GameNotDormant(); }
         if (gamePhase != GamePhase.DORMANT) revert GameNotDormant();
@@ -3113,21 +2956,7 @@ uint256 public dormancyParticipantCount;
         emit DormancyRefund(msg.sender, refund);
     }
 
-    /// @notice Sweeps expired unclaimed dormancy pool allocations to PROTOCOL_BENEFICIARY.
-    /// @dev [CRE v0.14 / NS-I-01] INTENTIONALLY PERMISSIONLESS (no onlyOwner), unlike the other
-    ///      owner-gated sweeps. Everything it moves goes to fixed destinations (PROTOCOL_BENEFICIARY
-    ///      and vcReturnOwed to the immutable VC address), and it is time-gated by the dormancy claim
-    ///      window, so anyone triggering it cannot redirect funds. Permissionless by design to avoid
-    ///      an owner-key-loss lock, matching sweepResetRefundRemainder()'s anti-lock rationale. A cold
-    ///      reviewer may flag the missing access control until they trace the destinations; this is it.
-    /// @dev Sweeps dormancy-specific pools only (OG pool, casual pool, commitment pool,
-    ///      per-head pool, prizePot remainder). The following are intentionally excluded
-    ///      and remain accessible via their own functions:
-    ///      - treasuryBalance: withdrawTreasury() (after gameSettled)
-    ///      - totalUnclaimedPrizes: claimPrize() / sweepUnclaimedPrizes()
-    ///      - resetDrawRefundPool(s): claimResetRefund() / sweepResetRefundRemainder()
-    ///      - commitmentRefundPool: claimCommitmentRefund() / sweepResetRefundRemainder()
-    ///      - draw30BonusFund: returned to prizePot at activateDormancy() before this fires.
+    /// @inheritdoc IBullsEthCRE
     function sweepDormancyRemainder() external nonReentrant {
         if (gamePhase != GamePhase.DORMANT) revert GameNotDormant();
         if (gameSettled) revert GameAlreadyClosed();
@@ -3142,7 +2971,7 @@ uint256 public dormancyParticipantCount;
                 uint256 _poolGap     = _vcShortfallTotal > dormancyVCPool ? _vcShortfallTotal - dormancyVCPool : 0;
                 uint256 _fromTreasury = _poolGap <= treasuryBalance ? _poolGap : treasuryBalance;
                 if (_fromTreasury > 0) treasuryBalance -= _fromTreasury;
-                vcReturnOwed   = dormancyVCPool + _fromTreasury;
+                vcReturnOwed  += dormancyVCPool + _fromTreasury; // [v1.17 / L-02] += not =: bare assignment on a fund var is safe only while this path and closeGame stay phase-exclusive
                 dormancyVCPool = 0; dormancyVCPoolSnapshot = 0; dormancyVCFullCover = false;
             }
             // [v1.11b] vcBonusEscrow transfer removed with the fixed-tier bonus mechanism.
@@ -3175,8 +3004,7 @@ uint256 public dormancyParticipantCount;
         emit DormancyRemainderSwept(remaining);
     }
 
-    /// @notice Refunds a batch of players during a failed pregame. PREGAME only. Owner only.
-    /// @param playerList  Array of player addresses to refund.
+    /// @inheritdoc IBullsEthCRE
     function batchRefundPlayers(address[] calldata playerList) external onlyOwner nonReentrant {
         if (gamePhase != GamePhase.PREGAME) revert WrongPhase();
         if (block.timestamp < signupDeadline) revert TooEarly();
@@ -3218,23 +3046,7 @@ uint256 public dormancyParticipantCount;
         }
     }
 
-    /// @notice Sweeps residual pregame contract balance to PROTOCOL_BENEFICIARY if the
-    ///         game never reached ACTIVE state. Owner only. PREGAME phase only.
-    ///         Individual player refunds are handled first by batchRefundPlayers() and
-    ///         claimSignupRefund(). This function closes the accounting and sweeps any
-    ///         remaining balance (treasuryBalance excepted) to PROTOCOL_BENEFICIARY.
-    ///         treasuryBalance remains withdrawable via withdrawTreasury() after
-    ///         gameSettled = true. Via time-gate path, unclaimed funds go to
-    ///         PROTOCOL_BENEFICIARY -- NOT returned to individual players.
-    /// @dev    [CRE v0.6 / MEDIUM-01] If a VC seed was deposited (potSeeded) but the game
-    ///         never started, the seed is returned to VC_SEED_RETURN_ADDRESS here, atomically,
-    ///         BEFORE the protocol-beneficiary sweep. Without this the deposited seed would be
-    ///         swept to PROTOCOL_BENEFICIARY -- a misroute of investor principal. seedReleased
-    ///         is always 0 in PREGAME (the supplement only fires in ACTIVE), so the full VC_SEED
-    ///         is the correct return amount. This is the mirror of the SE-H-01 guard: that stops
-    ///         the game defending a seed never deposited; this returns a seed that WAS deposited
-    ///         when the game never starts. The seed is subtracted from the residual first so the
-    ///         two transfers cannot draw on the same balance.
+    /// @inheritdoc IBullsEthCRE
     function sweepFailedPregame() external onlyOwner nonReentrant {
         if (gamePhase != GamePhase.PREGAME) revert WrongPhase();
         // Time-gate path: full extension window elapsed -- residuals sweep to PROTOCOL_BENEFICIARY
@@ -3279,9 +3091,7 @@ uint256 public dormancyParticipantCount;
         emit FailedPregameSwept(toProtocolBeneficiary);
     }
 
-    /// @notice Claims reset refund for the caller. Post-emergencyResetDraw only.
-    /// @dev [v2.15] Flat treasury: both pools use TREASURY_BPS (25%) regardless of draw [CRE v0.6 NS].
-    ///      Callers eligible for both pools must call twice -- returns after pool1.
+    /// @inheritdoc IBullsEthCRE
     function claimResetRefund() external nonReentrant {
         PlayerData storage p = players[msg.sender];
         if (p.isUpfrontOG) revert ResetRefundNotEligible();
@@ -3339,7 +3149,7 @@ uint256 public dormancyParticipantCount;
         }
     }
 
-    /// @notice Claims refund of pregame commitment if OG registration was cancelled.
+    /// @inheritdoc IBullsEthCRE
     function claimCommitmentRefund() external nonReentrant {
         if (commitmentRefundPool == 0) revert NothingToClaim();
         if (commitmentRefundDeadline > 0 && block.timestamp > commitmentRefundDeadline) revert ResetRefundExpired();
@@ -3365,14 +3175,7 @@ uint256 public dormancyParticipantCount;
         if (claim < claimAmount) emit CommitmentRefundPartial(msg.sender, claim, claimAmount);
     }
 
-    /// @notice Sweeps expired reset refund pools and expired commitment refund pool
-    ///         back to prizePot (ACTIVE) or protocol beneficiary (CLOSED/DORMANT).
-    ///         Sweeps: resetDrawRefundPool (pool 1), resetDrawRefundPool2 (pool 2),
-    ///         and commitmentRefundPool. Each swept independently on expiry.
-    ///         Permissionless -- any caller may trigger once the window expires.
-    /// @dev Intentionally permissionless -- any caller may trigger the sweep once the window expires.
-    ///      Economic outcome is identical regardless of caller. Permissionless design avoids
-    ///      permanent lock if owner becomes unavailable before the 30-day window expires.
+    /// @inheritdoc IBullsEthCRE
     function sweepResetRefundRemainder() external nonReentrant {
         bool tp1 = resetDrawRefundDraw != 0 && block.timestamp > resetDrawRefundDeadline;
         bool tp2 = resetDrawRefundDraw2 != 0 && block.timestamp > resetDrawRefundDeadline2;
@@ -3398,8 +3201,7 @@ uint256 public dormancyParticipantCount;
         }
     }
 
-    /// @notice Marks a player as lapsed (missed buy and not an active OG). Owner only.
-    /// @param player  Address of the player to mark as lapsed.
+    /// @inheritdoc IBullsEthCRE
     function markLapsed(address player) external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -3413,10 +3215,7 @@ uint256 public dormancyParticipantCount;
         emit PlayerLapsed(player, currentDraw);
     }
 
-    /// @notice Marks a batch of players as lapsed in a single owner call. ACTIVE phase only.
-    /// @dev Reimplements markLapsed() logic inline for gas efficiency.
-    ///      Phase and drawPhase checks fire once before the loop, not per-address.
-    /// @param playerList  Addresses to mark as lapsed.
+    /// @inheritdoc IBullsEthCRE
     function batchMarkLapsed(address[] calldata playerList) external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -3434,12 +3233,7 @@ uint256 public dormancyParticipantCount;
         }
     }
 
-    /// @notice Claims accumulated draw prizes owed to the caller.
-    /// @dev    WARNING: if sweepUnclaimedPrizes() has been called, prizesSweepComplete
-    ///         is permanently true and this function reverts NothingToClaim() for ALL
-    ///         callers. Individual p.unclaimedPrizes balances remain non-zero on-chain
-    ///         but are permanently unclaimable. Frontends must check prizesSweepComplete
-    ///         before displaying or allowing claim of any unclaimedPrizes balance.
+    /// @inheritdoc IBullsEthCRE
     function claimPrize() external nonReentrant {
         if (prizesSweepComplete) revert NothingToClaim();
         PlayerData storage p = players[msg.sender];
@@ -3472,6 +3266,13 @@ uint256 public dormancyParticipantCount;
     ///      [CRE v0.5 / NS] Updated.
     ///      Amount must not exceed treasuryBalance. recipient cannot be zero address.
     ///      [v2.06] TreasuryLocked reverts when (!gameSettled && prizePot < requiredEndPot).
+    ///      [v1.17 / NS-01] requiredEndPot is only the LAST of three gates on a withdrawal.
+    ///      Ordered: (1) WITHDRAW_START_DRAW window — no treasury withdrawal before that draw;
+    ///      (2) the VC-spent reserve — treasuryBalance minus the amount must still cover
+    ///      _releasable * (10000+VC_SPENT_RETURN_BPS+VC_SPENT_BONUS_BPS)/1e4 * (10000+
+    ///      VC_RESERVE_BUFFER_BPS)/1e4 (see the M-02 constructor bound that keeps this under
+    ///      100% of treasury); (3) this requiredEndPot trajectory lock. A withdrawal must clear
+    ///      all three.
     ///      requiredEndPot is the geometric solver OG floor:
     ///      ogEndgameObligation * targetReturnBps / 10000 + DRAW30_PRIZE_RESERVE + (VC_SEED - seedReleased). [CRE v0.9 / NS-L-01]
     ///      Treasury unlocks when pot recovers above requiredEndPot, or when gameSettled = true
@@ -3486,9 +3287,18 @@ uint256 public dormancyParticipantCount;
     ///      + VC_SPENT_BONUS_BPS of seedReleased if cumulativeSeasonTreasury >= VC_SPENT_BONUS_THRESHOLD.
     ///      This is the TRUE amount paid at close. The withdraw lock reserves this * (1 + buffer);
     ///      the buffer is never paid to the VC. UNSPENT seed is returned separately from the pot.
-    ///      Solvency: bounded by MAX_SEED_RELEASE_RATIO_BPS so this never exceeds treasury earned
-    ///      (see the constructor VC-SPENT-CAP guard). Grows only as seed is spent, in step with the
-    ///      treasury that funds it.
+    ///      Solvency: PARTIALLY bounded. The seed-supplement path in _calculatePrizePools() is
+    ///      capped by MAX_SEED_RELEASE_RATIO_BPS, and for that path alone the constructor
+    ///      VC-SPENT-CAP guard does hold this obligation at or below treasury earned. The v1.09
+    ///      T3 cold-start floor top-up in _processMatchesCore() is NOT ratio-bounded: it is capped
+    ///      only by unspent VC_SEED, MAX_SEED_PER_DRAW_BPS and prizePot. It can therefore raise
+    ///      seedReleased, and so this obligation, above the treasury that funds it, and it fired
+    ///      in the earliest draws when cumulativeSeasonTreasury was smallest.
+    ///      [v1.13 / H-02 RESOLVED] The T3 top-up now carries the same ratio ceiling, so the
+    ///      invariant seedReleased <= cumulativeSeasonTreasury * MAX_SEED_RELEASE_RATIO_BPS / 10000
+    ///      holds on BOTH release paths and the constructor guard is sound again. Proven by
+    ///      test/SmartEarnH02.t.sol, which asserts the invariant after every draw of the
+    ///      cold-start window. Consequence: the cold-start floor cannot fire in draw 1.
     /// @dev  NOTE [review pt4]: the bonus threshold reads cumulativeSeasonTreasury, which counts only
     ///      ACTIVE-DRAW ticket treasury slices, not the pregame/OG treasury slices. A heavily
     ///      OG-funded season can therefore earn a large treasury yet stay under the bonus threshold.
@@ -3502,7 +3312,7 @@ uint256 public dormancyParticipantCount;
         return seedReleased + _ret + _bonus;
     }
 
-    /// @notice Withdraws accrued treasury to a recipient. Owner only. Gated by VC + OG protections.
+    /// @inheritdoc IBullsEthCRE
     function withdrawTreasury(uint256 amount, address recipient) external onlyOwner nonReentrant {
         if (amount == 0 || amount > treasuryBalance) revert InsufficientBalance();
         if (recipient == address(0)) revert InvalidAddress();
@@ -3575,9 +3385,7 @@ uint256 public dormancyParticipantCount;
 
     // ── Governance (inherited unchanged) ──────────────────────────────────────
 
-    /// @notice Proposes a prize rate reduction with 48h timelock. Owner only.
-    /// @param newMultiplier  New prize rate multiplier BPS (< current). Min 5000 (50% of normal).
-    /// @param reason         Bytes32 reason code emitted in event for monitoring.
+    /// @inheritdoc IBullsEthCRE
     function proposePrizeRateReduction(uint256 newMultiplier, bytes32 reason) external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert WrongPhase();
         if (newMultiplier >= prizeRateMultiplier) revert CanOnlyDecrease();
@@ -3586,7 +3394,7 @@ uint256 public dormancyParticipantCount;
         pendingMultiplier = newMultiplier; pendingMultiplierReason = reason; multiplierEffectiveTime = block.timestamp + PRIZE_RATE_TIMELOCK;
         emit PrizeRateReductionProposed(newMultiplier, multiplierEffectiveTime, reason);
     }
-    /// @notice Executes a pending prize rate reduction after the timelock. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function executePrizeRateReduction() external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert WrongPhase();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -3597,14 +3405,14 @@ uint256 public dormancyParticipantCount;
         pendingMultiplier = 0; pendingMultiplierReason = 0; multiplierEffectiveTime = 0;
         emit PrizeRateReductionExecuted(old, prizeRateMultiplier, lastMultiplierChangeReason);
     }
-    /// @notice Cancels a pending prize rate reduction proposal. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function cancelPrizeRateReduction() external onlyOwner {
         if (pendingMultiplier == 0) revert NoTimelockPending();
         if (pendingMultiplier >= prizeRateMultiplier) revert WrongPhase();
         pendingMultiplier = 0; pendingMultiplierReason = 0; multiplierEffectiveTime = 0;
         emit PrizeRateReductionCancelled();
     }
-    /// @notice Cancels a pending prize rate increase proposal. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function cancelPrizeRateIncrease() external onlyOwner {
         if (pendingMultiplier == 0) revert NoTimelockPending();
         if (pendingMultiplier <= prizeRateMultiplier) revert WrongPhase();
@@ -3625,7 +3433,7 @@ uint256 public dormancyParticipantCount;
         pendingMultiplier = newMultiplier; pendingMultiplierReason = reason; multiplierEffectiveTime = block.timestamp + PRIZE_RATE_TIMELOCK;
         emit PrizeRateIncreaseProposed(newMultiplier, multiplierEffectiveTime, reason);
     }
-    /// @notice Executes a pending prize rate increase after the timelock. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function executePrizeRateIncrease() external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert WrongPhase();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -3636,14 +3444,7 @@ uint256 public dormancyParticipantCount;
         pendingMultiplier = 0; pendingMultiplierReason = 0; multiplierEffectiveTime = 0;
         emit PrizeRateIncreaseExecuted(old, prizeRateMultiplier, lastMultiplierChangeReason);
     }
-    /// @notice Proposes an override of the breath multiplier with 7-day timelock. Owner only.
-    /// @dev [v2.01] UP-direction proposals revert PotBelowTrajectory when pot health
-    ///      (prizePot * 10000 / requiredEndPot) < 8000 (below 80%). Same gate fires
-    ///      at executeBreathOverride. See also: exhaleFloorReleaseBps threshold (120%)
-    ///      which governs auto-adjust floor releases -- two independent pot-health
-    ///      thresholds operate simultaneously.
-    /// @param newMultiplier  New breathMultiplier BPS. Must be within [breathRailMin, breathRailMax].
-    /// @param reason         Bytes32 reason code emitted in event for monitoring.
+    /// @inheritdoc IBullsEthCRE
     function proposeBreathOverride(uint256 newMultiplier, bytes32 reason) external onlyOwner nonReentrant {
         if (gamePhase != GamePhase.ACTIVE) revert WrongPhase();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -3655,10 +3456,7 @@ uint256 public dormancyParticipantCount;
         pendingBreathOverride = newMultiplier; pendingBreathOverrideReason = reason; breathOverrideEffectiveTime = block.timestamp + TIMELOCK_DELAY;
         emit BreathOverrideProposed(newMultiplier, breathOverrideEffectiveTime, reason);
     }
-    /// @notice Executes a pending breath override after the timelock. Owner only.
-    /// @dev UP-direction overrides re-check pot health < 80% at execution time
-    ///      (same PotBelowTrajectory guard as proposeBreathOverride). If pot health
-    ///      dropped below 80% between proposal and execution, the execute reverts.
+    /// @inheritdoc IBullsEthCRE
     function executeBreathOverride() external onlyOwner nonReentrant {
         if (pendingBreathOverride == 0) revert NoTimelockPending();
         if (block.timestamp < breathOverrideEffectiveTime) revert TooEarly();
@@ -3675,26 +3473,13 @@ uint256 public dormancyParticipantCount;
         emit BreathMultiplierAdjusted(oldMultiplier, newMultiplier, newMultiplier > oldMultiplier);
         emit BreathOverrideExecuted(oldMultiplier, newMultiplier, lastBreathOverrideReason);
     }
-    /// @notice Cancels a pending breath override proposal. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function cancelBreathOverride() external onlyOwner {
         if (pendingBreathOverride == 0) revert NoTimelockPending();
         uint256 cancelled = pendingBreathOverride; pendingBreathOverride = 0; pendingBreathOverrideReason = bytes32(0); breathOverrideEffectiveTime = 0;
         emit BreathOverrideCancelled(cancelled);
     }
-    /// @notice Proposes new breath rail bounds. Owner only. 7-day timelock.
-    /// @dev newMin must be >= ABSOLUTE_BREATH_FLOOR (100 bps). newMax must be <= ABSOLUTE_BREATH_CEILING (2000 bps).
-    ///      [v1.61] Setting a low breathRailMax can reduce draw-1 T3 prizes.
-    ///      _computeStartingBreath() calibrates initial breath to target T3 near TICKET_PRICE.
-    ///      If breathRailMax < t3FloorBreath (output of _computeStartingBreath,
-    ///      see step 3 of startGame()) the calibration target cannot be met.
-    ///      At default breathRailMax=1500 the target is achievable at normal parameters.
-    /// @param newMin   New minimum breath BPS. Must be >= ABSOLUTE_BREATH_FLOOR (100).
-    /// @param newMax   New maximum breath BPS. Must be <= ABSOLUTE_BREATH_CEILING (2000)
-    ///                 and strictly > newMin.
-    ///                 Equal rails (newMax == newMin) are NOT permitted here -- they would
-    ///                 bypass the geometric solver and are rejected with ExceedsLimit().
-    ///                 Use proposeBreathOverride() for fixed-rate mode instead.
-    /// @param reason   Bytes32 reason code emitted in BreathRailsProposed. Not stored on-chain.
+    /// @inheritdoc IBullsEthCRE
     function proposeBreathRails(uint256 newMin, uint256 newMax, bytes32 reason) external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert WrongPhase();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -3709,14 +3494,14 @@ uint256 public dormancyParticipantCount;
         pendingBreathRailMin = newMin; pendingBreathRailMax = newMax; breathRailsEffectiveTime = block.timestamp + TIMELOCK_DELAY;
         emit BreathRailsProposed(newMin, newMax, breathRailsEffectiveTime, reason);
     }
-    /// @notice Cancels a pending breath rails proposal. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function cancelBreathRails() external onlyOwner {
         if (breathRailsEffectiveTime == 0) revert NoTimelockPending();
         uint256 cMin = pendingBreathRailMin; uint256 cMax = pendingBreathRailMax;
         pendingBreathRailMin = 0; pendingBreathRailMax = 0; breathRailsEffectiveTime = 0;
         emit BreathRailsProposalCancelled(cMin, cMax);
     }
-    /// @notice Executes pending breath rail bounds after the timelock. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function executeBreathRails() external onlyOwner {
         if (breathRailsEffectiveTime == 0) revert NoTimelockPending();
         if (block.timestamp < breathRailsEffectiveTime) revert TooEarly();
@@ -3733,8 +3518,7 @@ uint256 public dormancyParticipantCount;
             emit BreathOverrideCancelled(cancelled);
         }
     }
-    /// @notice Proposes a primary price feed change with 7-day timelock. Owner only.
-    /// @param newFeed  Address of the new primary ETH/USD Chainlink feed (8 decimals required).
+    /// @inheritdoc IBullsEthCRE
     function proposeFeedChange(address newFeed) external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert WrongPhase();
         if (newFeed == address(0) || newFeed == USDC || newFeed == address(this)) revert InvalidAddress();
@@ -3747,7 +3531,7 @@ uint256 public dormancyParticipantCount;
         pendingEthFeedChange = PendingFeedChange(newFeed, block.timestamp + TIMELOCK_DELAY);
         emit FeedChangeProposed(newFeed, block.timestamp + TIMELOCK_DELAY);
     }
-    /// @notice Executes a pending feed change after the 7-day timelock. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function executeFeedChange() external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert WrongPhase();
         if (drawPhase != DrawPhase.IDLE) revert DrawInProgress();
@@ -3761,7 +3545,7 @@ uint256 public dormancyParticipantCount;
         emit FeedChangeExecuted(oldFeed, ethFeed);
         delete pendingEthFeedChange;
     }
-    /// @notice Cancels a pending feed change proposal. Owner only.
+    /// @inheritdoc IBullsEthCRE
     function cancelFeedChange() external onlyOwner {
         if (pendingEthFeedChange.effectiveTime == 0) revert NoTimelockPending();
         emit FeedChangeCancelled();
@@ -3770,18 +3554,7 @@ uint256 public dormancyParticipantCount;
 
     // ── Emergency reset ───────────────────────────────────────────────────────
 
-    /// @dev [v1.0] CUTOFF_SUBMISSION handled: if stuck past DRAW_STUCK_TIMEOUT,
-    ///      owner can call emergencyResetDraw() to reset. Same timeout applies.
-    ///      Cutoff state (t1/t2/t3CutoffDiff, snapshotTotalEntries) cleared on reset.
-    ///      tierPools loop uses i<3 (not i<4). p4Winners.slot clear REMOVED.
-    /// @notice Initiates an emergency draw reset. VOIDS the current draw: rolls back its
-    ///         distribution/accounting and unwinds OG status changes. [CRE v0.9 / NS-I-02]
-    ///         The draw number is CONSUMED, not re-run under the same number -- at
-    ///         reset-finalize the schedule re-anchors and currentDraw advances. "Replay"
-    ///         elsewhere refers to the next draw proceeding, not a repeat of the voided one.
-    ///         Owner only EXCEPT during UNWINDING phase: after UNWIND_CONTINUATION_TIMEOUT
-    ///         (7 days) any address may call to continue the unwind. This permissionless
-    ///         continuation prevents permanent lock if owner is unavailable mid-unwind.
+    /// @inheritdoc IBullsEthCRE
     function emergencyResetDraw() external nonReentrant {
         if (drawPhase == DrawPhase.UNWINDING) {
             if (msg.sender != owner()) { if (block.timestamp < phaseStartTimestamp + UNWIND_CONTINUATION_TIMEOUT) revert TooEarly(); }
@@ -3791,7 +3564,11 @@ uint256 public dormancyParticipantCount;
         if (gamePhase != GamePhase.ACTIVE) revert GameNotActive();
         if (drawPhase == DrawPhase.IDLE) revert NotStuck();
         if (drawPhase == DrawPhase.FINALIZING || drawPhase == DrawPhase.RESET_FINALIZING) revert WrongPhase();
-        if (block.timestamp < phaseStartTimestamp + DRAW_STUCK_TIMEOUT) revert TooEarly();
+        // [v1.14 / H-01] An exhausted-attempt draw unlocks the reset immediately. Otherwise the
+        // usual 48h stuck timeout applies. Both bounces and resubmissions refresh
+        // phaseStartTimestamp, so without this an unsatisfiable draw never reached the timeout.
+        if (cutoffAttempts < MAX_CUTOFF_ATTEMPTS
+            && block.timestamp < phaseStartTimestamp + DRAW_STUCK_TIMEOUT) revert TooEarly();
         uint256 amountReturned;
         // [v1.0] 3 tier pools only (i<3).
         for (uint256 i = 0; i < 3; i++) {
@@ -3805,10 +3582,21 @@ uint256 public dormancyParticipantCount;
         if (currentDrawSeedReturn > 0) { amountReturned += currentDrawSeedReturn; prizePot += currentDrawSeedReturn; currentDrawSeedReturn = 0; }
         // [CRE v0.8 / CR-L-01] Seed rollback block REMOVED. seedReleased is no longer
         // incremented in _calculatePrizePools(); it is deferred to _finalizeWeekCore()
-        // (skipped on reset-finalize). A reset therefore never counted this draw's supplement
-        // as released, so there is nothing to roll back. The prior full-rollback here
-        // over-corrected when a reset fired mid-DISTRIBUTING after partial credit, desyncing
-        // seedReleased. currentDrawSeedSupplement is still cleared in the reset cleanup below.
+        // (skipped on reset-finalize). A reset therefore never counts this draw's supplement
+        // as released, so no rollback is needed. currentDrawSeedSupplement is still cleared in
+        // the reset cleanup below.
+        //
+        // RESIDUAL, stated plainly [v1.12]. The deferral removed the rollback machinery. It did
+        // NOT change the partial-credit case. If a reset fires mid-DISTRIBUTING after some
+        // winners were already credited, the spent slice stays with those winners while
+        // seedReleased is not advanced, so seedReleased under-counts the seed actually spent by
+        // exactly the amount the old rollback also lost. Same direction, same magnitude. The
+        // effect is that VC_SEED - seedReleased over-states unreleased seed, so the VC is
+        // over-returned at settlement. Conservative in the investor's favour, bounded by one
+        // draw's supplement. Documented as accepted at changelog v0.9 / B-I-01.
+        //
+        // NOT covered by that v0.9 note: currentDrawT3FloorTopup, added at v1.10, inherits the
+        // identical residual and post-dates it. Both deferrals share the behaviour.
         // [v1.68] Roll back bonus contribution from failed draw -- prevents double-accumulation on replay.
         // [v1.69] currentDrawBonusContribution is cleared in the reset cleanup below
         // and again by _finalizeWeekCore at end of unwind. Both are intentional:
@@ -3823,6 +3611,7 @@ uint256 public dormancyParticipantCount;
         resolvedPrice = 0;
         // [v1.0] Clear cutoff state on emergency reset.
         t1CutoffDiff = 0; t2CutoffDiff = 0; t3CutoffDiff = 0; snapshotTotalEntries = 0;
+        cutoffAttempts = 0; // [v1.14 / H-01]
         if (pendingBreathOverride != 0) { uint256 cancelled = pendingBreathOverride; pendingBreathOverride = 0; pendingBreathOverrideReason = bytes32(0); breathOverrideEffectiveTime = 0; emit BreathOverrideCancelled(cancelled); }
         if (breathRailsEffectiveTime != 0) { uint256 cMin = pendingBreathRailMin; uint256 cMax = pendingBreathRailMax; pendingBreathRailMin = 0; pendingBreathRailMax = 0; breathRailsEffectiveTime = 0; emit BreathRailsProposalCancelled(cMin, cMax); }
         if (dormancyEffectiveTime != 0) { dormancyEffectiveTime = 0; emit DormancyCancelled(); }
@@ -3921,23 +3710,7 @@ uint256 public dormancyParticipantCount;
 
     // ── View functions ─────────────────────────────────────────────────────────
 
-    /// @notice Returns full player state (14 values). See @dev for ABI change note.
-    /// @dev [v1.3] ABI CHANGE from v1.2: mulliganUsedVal (bool) removed from return tuple.
-    ///      Returns 14 values (was 15). Subgraphs and frontends must update their decoder.
-    /// @return registered         True if register() was called.
-    /// @return upfrontOG          True if active upfront OG.
-    /// @return weeklyOG           True if active weekly OG.
-    /// @return statusLost         True if weekly OG status was lost this season.
-    /// @return prediction         Primary price prediction (USD cents) for current predictionDraw.
-    /// @return prediction2        Secondary price prediction (USD cents).
-    /// @return predictionDraw     Draw number for which primary prediction was last set.
-    /// @return prediction2Draw    Draw number for which secondary prediction was last set.
-    /// @return streak             Consecutive-week buy streak count.
-    /// @return unclaimed          Unclaimed prize balance (USDC 6-dec).
-    /// @return totalWon           Cumulative prizes won lifetime (USDC 6-dec).
-    /// @return boughtThisWeek     True if tickets bought in currentDraw.
-    /// @return totalPaid          Cumulative USDC paid to the contract (6-dec).
-    /// @return qualifiedForEndgame True if currently eligible for claimEndgame().
+    /// @inheritdoc IBullsEthCRE
     function getPlayerInfo(address addr) external view returns (
         bool registered, bool upfrontOG, bool weeklyOG, bool statusLost,
         uint256 prediction, uint256 prediction2, uint256 predictionDraw, uint256 prediction2Draw,
@@ -3954,11 +3727,7 @@ uint256 public dormancyParticipantCount;
         );
     }
 
-    /// @notice Returns true if the current draw resolution result has gone stale.
-    /// @return  True if resolution is overdue (IDLE, lastResolvedDraw stale).
-    ///          False during any non-IDLE phase regardless of resolvedPrice --
-    ///          monitoring tools should check drawPhase independently.
-    ///          Also returns true when currentDraw == 0 (PREGAME, no draws started yet).
+    /// @inheritdoc IBullsEthCRE
     function isResultStale() external view returns (bool) {
         // draw-0 guard: prevents uint256 underflow on `currentDraw - 1` in the
         // general check below. NOT dead code -- PREGAME always has currentDraw==0.
@@ -3974,20 +3743,7 @@ uint256 public dormancyParticipantCount;
         return (lastResolvedDraw != currentDraw - 1) || (resolvedPrice == 0);
     }
 
-    /// @notice Returns a comprehensive snapshot of current game state.
-    /// @return gPhase       Current GamePhase enum value.
-    /// @return dPhase       Current DrawPhase enum value.
-    /// @return draw         Current draw number (0 = pre-game, 1-30 active).
-    /// @return pot          Current prizePot (USDC 6-dec).
-    /// @return treasury     Current treasuryBalance (USDC 6-dec).
-    /// @return unclaimed    Total unclaimed draw prizes outstanding (USDC 6-dec).
-    /// @return playerCount  Total registered player count.
-    /// @return upfrontOGs   Current upfront OG count.
-    /// @return weeklyOGs    Current weekly OG count.
-    /// @return breathMult   Current breathMultiplier (BPS).
-    /// @return obligLocked  True if OG obligation is locked (always true after startGame).
-    /// @return ogObligation Locked OG endgame obligation (USDC 6-dec).
-    /// @return lastResolved Last draw number for which price was resolved.
+    /// @inheritdoc IBullsEthCRE
     function getGameState() external view returns (
         GamePhase gPhase, DrawPhase dPhase, uint256 draw, uint256 pot,
         uint256 treasury, uint256 unclaimed, uint256 playerCount,
@@ -4024,33 +3780,13 @@ uint256 public dormancyParticipantCount;
         isSolvent = totalValue + SOLVENCY_TOLERANCE >= totalAllocated;
     }
 
-    /// @notice Returns current breath-based prize rate in BPS.
-    ///         Returns 0 when currentDraw >= TOTAL_DRAWS (draw 30). [v1.55 I-NEW-02]
-    /// @return  BPS prize rate (breathMultiplier * prizeRateMultiplier / 10000).
-    ///          Returns 0 at draw 30+ (surplus path used instead -- see notice above).
-    ///          At draw 0 (pregame): returns the initial breathMultiplier (informational).
-    ///         IMPORTANT: 0 on draw 30 does NOT mean zero payout. Draw 30 uses a special
-    ///         surplus path in _calculatePrizePools() that ignores this rate and distributes
-    ///         the pot above the running-average targeted holdback (29-draw OG ratio estimate). Draw 30 is typically the highest-payout
-    ///         draw of the season. Frontends should display "Final Draw -- Surplus Distribution"
-    ///         rather than "0% prize rate" when currentDraw >= TOTAL_DRAWS.
+    /// @inheritdoc IBullsEthCRE
     function getCurrentPrizeRate() public view returns (uint256) {
         if (currentDraw >= TOTAL_DRAWS) return 0;
         return breathMultiplier * prizeRateMultiplier / 10000;
     }
 
-    /// @notice Returns projected OG endgame payout per qualified OG.
-    /// @dev Pre-settlement: estimates pot / qualifiedOGs capped at OG_UPFRONT_COST * targetReturnBps / 10000.
-    ///      This matches the closeGame() perOGPromised ceiling (live ratio, not season average).
-    ///      [v1.59] closeGame() uses season-average ratio; actual payout may be higher.
-    ///      [v1.63] Cap corrected from OG_UPFRONT_COST to OG_UPFRONT_COST * targetReturnBps/10000.
-    /// @return currentPerOG  Projected payout per OG, capped at OG_UPFRONT_COST * targetReturnBps/10000.
-    /// @return obligation    Total OG endgame obligation at targetReturnBps.
-    /// @return potHealth     Pot as BPS of requiredEndPot (10000 = at solvency floor). [v1.68] Uncapped --
-    ///                       values above 10000 = above-floor health (e.g. 20000 = 2x requiredEndPot).
-    ///                       [v2.27] Denominator is requiredEndPot (obligation * targetReturnBps/10000
-    ///                       + DRAW30_PRIZE_RESERVE + unreleased VC seed), not gross obligation. [CRE v0.8 / NS-L-01]
-    ///                       Monitoring tools should calibrate alerts against requiredEndPot, not the gross figure.
+    /// @inheritdoc IBullsEthCRE
     function getProjectedEndgamePerOG() external view returns (uint256 currentPerOG, uint256 obligation, uint256 potHealth) {
         // [v1.58-P3] obligationLocked is always true from startGame() -- this branch never executes.
         if (!obligationLocked) return (0, 0, 0);
@@ -4069,18 +3805,7 @@ uint256 public dormancyParticipantCount;
         // values above 10000 as "above target" not clamp to 100%.
     }
 
-    /// @notice Returns OG registration counts and capacity figures.
-    /// @dev [v1.57-P1] upfrontMax is informational only -- the upfront OG ratio cap was
-    ///      removed from registerAsOG() in v1.57-P1. Any number of upfront OGs can register.
-    ///      weeklyMax / availableWeeklySlots are still enforced by _weeklyOGCapReached().
-    /// @return upfrontCurrent      upfrontOGCount -- registered upfront OGs.
-    /// @return upfrontMax          Computed upfront cap (formula: committedPlayerCount * UPFRONT_OG_CAP_BPS / 10000).
-    ///                             INFORMATIONAL ONLY. Cap removed in v1.57-P1. Any number of upfront
-    ///                             OGs can register regardless of this value.
-    /// @return weeklyCurrent       weeklyOGCount -- active weekly OGs.
-    /// @return weeklyMax           Computed weekly OG slot maximum (enforced).
-    /// @return totalMax            Computed total OG cap (upfront + weekly).
-    /// @return availableWeeklySlots  weeklyMax - weeklyCurrent (remaining weekly slots).
+    /// @inheritdoc IBullsEthCRE
     function getOGCapInfo() external view returns (uint256 upfrontCurrent, uint256 upfrontMax, uint256 weeklyCurrent, uint256 weeklyMax, uint256 totalMax, uint256 availableWeeklySlots) {
         uint256 denominator = gamePhase == GamePhase.PREGAME ? committedPlayerCount : ogCapDenominator;
         uint256 uMax = denominator * UPFRONT_OG_CAP_BPS / 10000;
@@ -4091,22 +3816,7 @@ uint256 public dormancyParticipantCount;
         return (upfrontOGCount, uMax, weeklyOGCount, wMax, tMax, available);
     }
 
-    /// @notice Returns pregame state for frontend display.
-    /// @dev [v1.57-P1] intentQueueClear always returns true -- intent queue removed.
-    ///      Retained in return signature for ABI compatibility with existing tooling.
-    ///      [v1.69] intentQueueClear is permanently true in all v1.57+ deployments.
-    ///      Any downstream consumer of this field should treat it as a deprecated constant.
-    /// @return committed          committedPlayerCount -- total pregame commitments.
-    /// @return upfrontOGs         upfrontOGCount.
-    /// @return weeklyOGs          weeklyOGCount.
-    /// @return neededToStart      MIN_PLAYERS_TO_START.
-    /// @return readyToStart       True when proposeStartGame() can be called: player threshold
-    ///                             met, PREGAME phase, no pending proposal, AND
-    ///                             block.timestamp < signupDeadline + MAX_PREGAME_DURATION.
-    ///                             Does NOT mean startGame() can execute -- that also requires
-    ///                             the 72h notice period to have elapsed.
-    /// @return intentQueueClear   Always true. Deprecated ABI-compat field from v1.57-P1.
-    /// @return proposalTimestamp  startGameProposedAt (0 if no proposal pending).
+    /// @inheritdoc IBullsEthCRE
     function getPreGameStats() external view returns (
         uint256 committed, uint256 upfrontOGs, uint256 weeklyOGs, uint256 neededToStart,
         bool readyToStart, bool intentQueueClear, uint256 proposalTimestamp
@@ -4127,18 +3837,7 @@ uint256 public dormancyParticipantCount;
         );
     }
 
-    /// @notice Returns dormancy pool balances and claim window status.
-    /// @return ogPoolRemaining       Remaining OG principal pool (USDC 6-dec).
-    /// @return principalFullCover    True if OG principal is fully covered by pot.
-    /// @return casualPoolRemaining   Remaining casual refund pool (USDC 6-dec).
-    /// @return casualFullCover       True if casual refund pool is fully covered.
-    /// @return casualTicketTotal     Total casual ticket contributions at dormancy.
-    /// @return commitmentPoolRemaining Remaining commitment refund pool (USDC 6-dec).
-    /// @return commitmentFullCover   True if commitment pool is fully covered.
-    /// @return perHeadPoolRemaining  Remaining per-head surplus pool (USDC 6-dec).
-    /// @return perHeadShare          Per-participant share amount (USDC 6-dec).
-    /// @return participantCount      Number of participants eligible for per-head share.
-    /// @return sweepWindowOpens      Timestamp when unclaimed funds can be swept (0 if not dormant).
+    /// @inheritdoc IBullsEthCRE
     function getDormancyInfo() external view returns (
         uint256 ogPoolRemaining, bool principalFullCover,
         uint256 casualPoolRemaining, bool casualFullCover, uint256 casualTicketTotal,
@@ -4152,69 +3851,12 @@ uint256 public dormancyParticipantCount;
             dormancyTimestamp > 0 ? dormancyTimestamp + DORMANCY_CLAIM_WINDOW : 0);
     }
 
-    /// @notice Returns current cutoff diff state for monitoring and keeper verification. [v1.0]
-    /// @return _t1        t1CutoffDiff (top 1% boundary diff value).
-    /// @return _t2        t2CutoffDiff (top ~6% cumulative boundary diff value).
-    /// @return _t3        t3CutoffDiff (top ~12-15% boundary diff value).
-    /// @return _snapshot  snapshotTotalEntries used as BPS denominator.
+    /// @inheritdoc IBullsEthCRE
     function getCutoffState() external view returns (uint256 _t1, uint256 _t2, uint256 _t3, uint256 _snapshot) {
         return (t1CutoffDiff, t2CutoffDiff, t3CutoffDiff, snapshotTotalEntries);
     }
 
-    /// @notice Returns the count bounds that submitCutoffDiffs() will verify against. [v1.51]
-    ///         Keepers SHOULD call this before submitting cutoff diffs to pre-validate
-    ///         their computed counts. If submitted counts fall outside these bounds,
-    ///         submitCutoffDiffs() will revert CutoffOutOfRange.
-    ///
-    ///         KEEPER WORKFLOW:
-    ///           1. Wait for drawPhase == CUTOFF_SUBMISSION.
-    ///           2. Read all predictions from chain events.
-    ///           3. Compute diffs = |prediction * PREDICTION_SCALE - resolvedPrice| for each entry.
-    ///           4. Sort entries by diff ascending.
-    ///           5. Find diff values at 1%, ~6%, and ~12-15% cumulative thresholds (draw-schedule
-    ///              dependent; include tie clusters). T3_COUNT_MIN_BPS=1000 means target >= 10%.
-    ///           6. Call getRequiredCutoffDiffBounds() to verify your counts are in range.
-    ///           7. If counts in range, call submitCutoffDiffs().
-    ///
-    ///      ENTRY ENUMERATION RULES (v2.35 I-04 / NS-I-01 -- load-bearing post-M-01):
-    ///        The entry count you compute in step 3-4 MUST match _processMatchesCore()
-    ///        exactly or your honest diff counts will trip MatchCountMismatch.
-    ///        Rules as of v2.34:
-    ///          - OGs (isUpfrontOG OR isWeeklyOG && !weeklyOGStatusLost): 2 entries each.
-    ///            prediction1 auto-filled from autoDefaultPrediction if stale or zero.
-    ///            prediction2 always auto-filled regardless (OG always has 2 entries).
-    ///          - Casuals (weeklyNonOGPlayers): 1 entry for lastTicketCount == 1.
-    ///            prediction1 auto-filled from autoDefaultPrediction if stale or zero.
-    ///          - Casuals (weeklyNonOGPlayers): 2 entries for lastTicketCount >= 2.
-    ///            prediction1 auto-filled. prediction2 auto-filled if stale or zero.
-    ///            [Changed at v2.34 M-01: previously prediction2 was dropped if not
-    ///            explicitly submitted. Update off-chain keeper spec to match.]
-    ///        autoDefaultPrediction = lastResolvedPrice if <= DRAW_COOLDOWN old;
-    ///        else defaultPrediction. Same value used for all fills in one draw.
-    ///
-    /// @return inCutoffSubmission  True if currently awaiting keeper submission.
-    /// @return snapshot            snapshotTotalEntries -- denominator for all BPS checks.
-    /// @return t1Min               Minimum acceptable T1 count (0.5% of snapshot).
-    /// @return t1Max               Maximum acceptable T1 count (4% of snapshot).
-    /// @return t2Min               Minimum acceptable T2 cumulative count (4% of snapshot).
-    /// @return t2Max               Maximum acceptable T2 cumulative count (12% of snapshot). [v2.18: was 6%]
-    /// @return t3Min               Minimum acceptable T3 cumulative count (10% of snapshot). [v2.18: was 16%]
-    /// @return t3Max               Maximum acceptable T3 cumulative count (50% of snapshot).
-    ///      NOTE: At draws 1-2 (T3_WINNER_BPS_D1_2=600) theoretical cumulative is ~12%.
-    ///      The 10% minimum gives a 2% margin -- the tightest point in the season.
-    ///      OG status losses during MATCHING reduce actual entries vs snapshot (overcounting)
-    ///      which can push BPS lower. Verified safe at 20% OG + 10% attrition.
-    ///      [v2.19] Margin structurally identical to old design: 12%-10% MIN = 2pp
-    ///      (old: 18%-16% = 2pp). Re-confirm under new schedule before production.
-    ///                             Upper bound is wide due to 2-ticket casual snapshot bias.
-    ///                             Actual T3% of real entries is 12-15% depending on draw.
-    /// @return priceForDiffs       resolvedPrice -- compute diffs against this value.
-    /// @dev    DENOMINATOR NOTE: all bounds are computed against snapshotTotalEntries,
-    ///         which uses the same 2-ticket casual undercount bias as submitCutoffDiffs().
-    ///         (Each casual = 1 in snapshot regardless of ticket count; 2-ticket casuals
-    ///         generate 2 entries. This makes BPS values read higher than actual percentages.)
-    ///         Keepers do NOT need to adjust for this -- the bounds returned here exactly
-    ///         match what submitCutoffDiffs() will accept. The bias is consistent end-to-end.
+    /// @inheritdoc IBullsEthCRE
     function getRequiredCutoffDiffBounds() external view returns (
         bool   inCutoffSubmission,
         uint256 snapshot,
@@ -4248,59 +3890,30 @@ uint256 public dormancyParticipantCount;
         priceForDiffs = resolvedPrice;
     }
 
-    /// @notice Returns the most recently resolved ETH/USD price (Chainlink 8-dec).
-    ///         Returns 0 between draws and during draw 1 before the first resolution.
+    /// @inheritdoc IBullsEthCRE
     function getResolvedPrice() external view returns (int256) { return resolvedPrice; }
 
-    /// @notice Returns winner counts for each tier in the current draw.
-    /// @dev [v1.0] 3 tiers only (T1/T2/T3). p4 REMOVED -- ABI change from 1Y game.
-    ///      Subgraphs must update from 4-return to 3-return signature.
-    /// @dev During IDLE phase these reflect the most recently completed draw.
-    ///      Arrays are cleared at the start of resolveWeek() for the next draw,
-    ///      not at finalizeWeek(). Counts are accurate during MATCHING → FINALIZING only.
-    /// @return t1  T1 (1% Club) winner count.
-    /// @return t2  T2 winner count.
-    /// @return t3  T3 winner count.
+    /// @inheritdoc IBullsEthCRE
     function getWinnerCounts() external view returns (uint256 t1, uint256 t2, uint256 t3) {
         return (jpWinners.length, p2Winners.length, p3Winners.length);
     }
 
-    /// @notice Returns true if prediction is within [1, MAX_PREDICTION_CENTS].
-    /// @param prediction  Value to validate.
-    /// @return valid   True if prediction falls within [1, MAX_PREDICTION_CENTS].
-    /// @return reason  Human-readable rejection reason if invalid; empty string if valid.
+    /// @inheritdoc IBullsEthCRE
     function isValidPrediction(uint256 prediction) external pure returns (bool valid, string memory reason) {
         if (prediction == 0) return (false, "Prediction must be greater than zero");
         if (prediction > MAX_PREDICTION_CENTS) return (false, "Prediction exceeds maximum ($10 trillion USD / 1 quadrillion cents)");
         return (true, "");
     }
 
-    /// @notice Returns 0-based ogList index for addr.
-    /// @dev    Returns 0 for both the first list entry AND addresses not in the list
-    ///         (storage default). AMBIGUOUS on its own. Always confirm membership via
-    ///         p.isUpfrontOG || p.isWeeklyOG before using this index for list operations.
-    /// @param addr  Address to look up.
+    /// @inheritdoc IBullsEthCRE
     function getOGListIndex(address addr) external view returns (uint256) { return ogListIndex[addr]; }
 
-    /// @notice Returns the contract version string.
-    /// @return  Version string identifying this deployment.
+    /// @inheritdoc IBullsEthCRE
     function getContractVersion() external pure returns (string memory) {
-        return "BullsEthCRE_v1.11b";
+        return "BullsEthCRE_v1.17";
     }
 
-    /// @notice Returns current draw-30 bonus fund balance and expected contribution per draw.
-    /// @dev [v1.62] For off-chain monitoring and frontend display.
-    ///      perDrawEstimate returns 0 at draw 30 because getCurrentPrizeRate() returns 0
-    ///      on the final draw. accumulated reflects the full season siphon at that point.
-    /// @return accumulated  Total bonus siphoned so far.
-    /// @return perDrawEstimate  Estimated bonus per draw at current breathMultiplier
-    ///                          and prizeRateMultiplier (via getCurrentPrizeRate()).
-    ///                          Returns 0 at draw 30+ (getCurrentPrizeRate() returns 0).
-    ///                          [CRE v0.13] Excludes any active seed supplement. The bonus
-    ///                          siphon in _calculatePrizePools() is taken from weeklyPool
-    ///                          INCLUDING the supplement, so on supplement-active draws the
-    ///                          real per-draw bonus contribution is proportionally higher than
-    ///                          this estimate. Monitoring only; no economic effect.
+    /// @inheritdoc IBullsEthCRE
     function getDraw30BonusStatus() external view returns (
         uint256 accumulated, uint256 perDrawEstimate
     ) {
@@ -4310,21 +3923,7 @@ uint256 public dormancyParticipantCount;
         perDrawEstimate = weeklyEst * DRAW30_BONUS_BPS / 10000;
     }
 
-    /// @notice Returns current pot health relative to requiredEndPot.
-    ///         Used by operators and front-ends to monitor exhale floor gate status.
-    /// @dev [v1.60] potHealthBps = prizePot * 10000 / requiredEndPot.
-    ///      Gate fires when potHealthBps < exhaleFloorReleaseBps (default 12000).
-    ///      Integer division truncates -- e.g. exact 1.2x gives potHealthBps=11999,
-    ///      so gateActive returns true ~0.01% before the nominal threshold. Consequence:
-    ///      exhale floor may release fractionally early. Negligible in practice.
-    ///      gateActive is true only during exhale phase (currentDraw > INHALE_DRAWS).
-    /// @return potHealthBps  Current pot as BPS of requiredEndPot (10000 = 100%).
-    ///                       Returns 10000 as a sentinel when requiredEndPot == 0
-    ///                       (no OG obligation locked -- game has no OGs or obligation
-    ///                       not yet set). Sentinel indicates no floor exists, not full
-    ///                       health. gateActive will be false in this state.
-    /// @return gateActive    True if the gate could currently release the exhale floor.
-    /// @return threshold     Current exhaleFloorReleaseBps setting.
+    /// @inheritdoc IBullsEthCRE
     function getExhaleFloorHealth() external view returns (
         uint256 potHealthBps, bool gateActive, uint256 threshold
     ) {
@@ -4335,18 +3934,7 @@ uint256 public dormancyParticipantCount;
         gateActive = currentDraw > INHALE_DRAWS && potHealthBps < threshold;
     }
 
-    /// @notice Pre-flight solvency check. Call before startGame() to verify the
-    ///         game can be started without reverting PotBelowTrajectory.
-    /// @dev [v1.58-P3] Runs the same geometric simulation as startGame().
-    ///      Returns (true, 0) if solvent. Returns (false, deficit) if not,
-    ///      where deficit is how much extra revenue per draw is needed.
-    ///      Uses current breathRailMin, prizePot, and committed player counts.
-    ///      PREGAME only -- call during signup window to diagnose before startGame.
-    ///      [v1.59] Uses live OG ratio for the floor estimate (conservative).
-    ///      Actual perOGPromised at closeGame() uses the season average and may
-    ///      be higher if the ratio was elevated early but drops mid-season.
-    /// @return solvent  True if the geometric simulation confirms solvency at breathRailMin.
-    /// @return deficit  Approximate per-draw revenue shortfall if not solvent (lower-bound estimate).
+    /// @inheritdoc IBullsEthCRE
     function checkSolvency() external view returns (bool solvent, uint256 deficit) {
         if (gamePhase != GamePhase.PREGAME) revert WrongPhase(); // PREGAME only
         uint256 maxOGs = upfrontOGCount + earnedOGCount;
@@ -4372,14 +3960,7 @@ uint256 public dormancyParticipantCount;
         return (false, deficit);
     }
 
-    /// @notice Returns the current auto-default prediction value and whether it is the seed fallback.
-    /// @dev cents is autoDefaultCents (last resolved price in cent units) when > 0.
-    ///      isSeed = true when autoDefaultCents == 0, meaning defaultPrediction is used instead.
-    ///      Frontends must handle both cases differently -- isSeed = true means no prior resolution.
-    /// @return cents     Auto-default prediction in USD cents. When isSeed=true this is
-    ///                   the owner-set defaultPrediction (always non-zero by constructor);
-    ///                   when isSeed=false this is autoDefaultCents from the previous draw.
-    /// @return isSeed    True when falling back to the owner-set defaultPrediction.
+    /// @inheritdoc IBullsEthCRE
     function getAutoDefault() external view returns (uint256 cents, bool isSeed) {
         if (autoDefaultCents > 0) return (autoDefaultCents, false);
         return (defaultPrediction, true);
@@ -4401,8 +3982,7 @@ uint256 public dormancyParticipantCount;
         }
     }
 
-    /// @notice Counts all stale weekly OGs in the full ogList. Unbounded -- use paginated overload for large lists.
-    /// @return staleCount  Number of weekly OGs with weeklyOGStatusLost == true.
+    /// @inheritdoc IBullsEthCRE
     function countStaleOGs() external view returns (uint256 staleCount) {
         for (uint256 i = 0; i < ogList.length; i++) {
             // Invariant: weeklyOGStatusLost only set on isWeeklyOG==true entries.
@@ -4410,11 +3990,7 @@ uint256 public dormancyParticipantCount;
         }
     }
 
-    /// @notice Counts stale weekly OGs in a paginated range. For keeper gas estimation.
-    ///         A weekly OG is stale when weeklyOGStatusLost is true and not yet pruned.
-    /// @param start  Index into ogList to start from (0-based).
-    /// @param count  Maximum number of entries to check from start.
-    /// @return staleCount  Number of stale weekly OGs found in the range.
+    /// @inheritdoc IBullsEthCRE
     function countStaleOGs(uint256 start, uint256 count) external view returns (uint256 staleCount) {
         uint256 len = ogList.length;
         if (start >= len) return 0;
@@ -4631,13 +4207,11 @@ uint256 public dormancyParticipantCount;
     ///      before the snapshot runs. Snapshot finds no delta and returns early.
     ///      FinalReturnCalibrated event covers the draw-28 change.
     ///      OGObligationSnapshot fires at draw 28 only if OG count also changed.
-    /// @notice [CRE v1.01 / DORM-FLOOR] Single source of truth for the solver floor.
-    ///         Returns max(endgame obligation, live dormancy obligation) so the
-    ///         geometric solver can never draw prizePot below what a dormancy-now
-    ///         would owe the senior tiers (VC, then upfront OGs) plus the current
-    ///         draw's ticket buyers. Makes the early-dormancy senior-tier shortfall
-    ///         structurally unreachable. VC is senior to OGs (unchanged ordering);
-    ///         this floor guarantees enough for both so the seniority never bites.
+    /// @notice [CRE v1.04 / FLOOR-SPLIT] Prices the ENDGAME solver floor for a given OG
+    ///         obligation. (The stale [CRE v1.01 / DORM-FLOOR] "returns max(endgame, live
+    ///         dormancy)" description was removed at v1.17: since FLOOR-SPLIT this function
+    ///         returns the endgame target only, and the live dormancy-now floor is a
+    ///         separate function. See _requiredEndPotFloor and _dormancyNowFloor.)
     /// @param  _obligation  ogEndgameObligation to price this call against (callers
     ///                      pass either the stored value or a freshly computed one).
     /// @dev    Dormancy obligation mirrors activateDormancy()'s TIER 0 + TIER 1 +
@@ -4740,19 +4314,28 @@ uint256 public dormancyParticipantCount;
     ) internal returns (uint256 breathBps) {
         // [v2.06] view removed -- function emits SolverDistressSignal on insolvent path.
         // Cannot be called from view/pure contexts. Only caller: _checkAutoAdjust() (internal).
-        if (drawsLeft == 0 || pot == 0) return breathRailMin;
+        if (drawsLeft == 0 || pot == 0) return 0; // [v1.17 / L-03] not breathRailMin: the rail is not a solvency constraint (H-06); weeklyPool is zero here either way
         // Insolvent scenario: pot + all future revenue cannot reach the required floor
         // even with zero distribution. No breath value can satisfy the floor.
-        // Return breathRailMin as the least-damaging option -- startGame() solvency
-        // check should have caught this before deployment.
+        // [v1.14 / H-06] The line that used to sit here said "return breathRailMin as the
+        // least-damaging option". That is no longer what this function does and was no longer
+        // true when it was written: see the H-06 block below, which returns 0. Removed rather
+        // than left to contradict the code beneath it.
         // Linear upper bound: at breathBps=0 no prizes are distributed, pot grows by
         // exactly revPerDraw per draw -- equivalent to _simGeomPot(pot, 0, drawsLeft, revPerDraw).
         // Overflow safe: drawsLeft <= 29, revPerDraw is EMA-bounded by actual ticket revenue.
         uint256 projEnd = pot + revPerDraw * drawsLeft;
         // [v2.05] Emit distress signal for operator monitoring on insolvent path.
+        // [v1.14 / H-06] Return 0, NOT breathRailMin. This branch means the floor is
+        // unreachable even distributing nothing. Returning breathRailMin here kept the
+        // contract spending ~0.9% of the pot every draw at precisely the moment it should
+        // have stopped, deepening the shortfall it was signalling. Distributing nothing is
+        // the least-damaging response: it preserves the maximum possible pot for the
+        // senior obligations. Draws in this state pay no prizes, which is visible via
+        // TierSkippedDust and this signal.
         if (projEnd <= floor) {
             emit SolverDistressSignal(currentDraw, pot, floor, drawsLeft, projEnd);
-            return breathRailMin;
+            return 0;
         }
         uint256 lo = 0;
         uint256 hi = breathRailMax;
@@ -4764,7 +4347,22 @@ uint256 public dormancyParticipantCount;
                 hi = mid - 1; // mid overshoots -- try lower
             }
         }
-        if (lo < breathRailMin) return breathRailMin;
+        // [v1.14 / H-06] RAIL RELEASE. breathRailMin is a PRIZE-EXPERIENCE floor, not a
+        // solvency constraint, and ABSOLUTE_BREATH_FLOOR (100 bps) put a hard bottom under
+        // it that even governance could not lower. Clamping the solver up to that rail meant
+        // the contract was REQUIRED to distribute ~0.9% of the pot every draw regardless of
+        // circumstance. Simulated on the contract's own _simGeomPot: 50 upfront OGs, $100k
+        // VC seed, floor $120,000, pot $130,000 at draw 20, revenue collapsing to zero for
+        // the last 10 draws. At breathRailMin the pot ends $1,237 SHORT of the floor; at
+        // breath 0 the same scenario ends $10,000 CLEAR. The revenue collapse did not break
+        // the guarantee, the rail did. Solvency now wins: when the solver's answer is below
+        // the rail, holding the rail would breach requiredEndPot, so the solver is honoured.
+        // lo is always floor-satisfying by construction (the search only raises lo on a
+        // passing simulation, and lo = 0 is known to pass because projEnd > floor above).
+        if (lo < breathRailMin) {
+            emit BreathRailReleased(currentDraw, breathRailMin, lo, pot, floor);
+            return lo; // may be 0
+        }
         if (lo > breathRailMax) return breathRailMax;
         return lo;
     }
@@ -4801,12 +4399,7 @@ uint256 public dormancyParticipantCount;
 
     // ── Exhale floor governance ────────────────────────────────────────────────
 
-    /// @notice Proposes a new exhale floor release threshold. Owner only. 48h timelock.
-    /// @dev [v1.60] newBps must be in [8000, 20000]. Values outside this range revert.
-    ///      8000 (80%): floor holds until deep distress -- prioritises prize experience.
-    ///      20000 (200%): floor releases proactively -- prioritises solvency.
-    ///      Default 12000 (120%) is the recommended balanced setting.
-    /// @param newBps  New threshold in BPS. Must be in [8000, 20000].
+    /// @inheritdoc IBullsEthCRE
     function proposeExhaleFloorRelease(uint256 newBps) external onlyOwner {
         if (gamePhase != GamePhase.ACTIVE) revert WrongPhase();
         if (newBps < 8000) revert BelowMinimum();
@@ -4817,9 +4410,7 @@ uint256 public dormancyParticipantCount;
         emit ExhaleFloorReleaseProposed(newBps, pendingExhaleFloorReleaseTime);
     }
 
-    /// @notice Executes a pending exhale floor release proposal after timelock.
-    /// @dev [v1.60] Reverts TooEarly() if called before the 48h timelock expires.
-    ///      Reverts NoTimelockPending() if no proposal is pending.
+    /// @inheritdoc IBullsEthCRE
     function executeExhaleFloorRelease() external onlyOwner {
         if (pendingExhaleFloorReleaseTime == 0) revert NoTimelockPending();
         if (block.timestamp < pendingExhaleFloorReleaseTime) revert TooEarly();
@@ -4830,7 +4421,7 @@ uint256 public dormancyParticipantCount;
         emit ExhaleFloorReleaseUpdated(oldBps, exhaleFloorReleaseBps);
     }
 
-    /// @notice Cancels a pending exhale floor release proposal.
+    /// @inheritdoc IBullsEthCRE
     function cancelExhaleFloorRelease() external onlyOwner {
         if (pendingExhaleFloorReleaseTime == 0) revert NoTimelockPending();
         uint256 cancelled = pendingExhaleFloorReleaseBps;
@@ -4844,7 +4435,12 @@ uint256 public dormancyParticipantCount;
     ///      revenue estimate tightens and solver becomes more conservative. Safe.
     function _checkAutoAdjust() internal {
         // [v1.58-P3] Pre-lock branch removed -- obligationLocked is always true from draw 1.
-        if (ogEndgameObligation == 0) return;
+        // [v1.17 / L-01] Original guard skipped the solver whenever there were no OG endgame
+        // obligations, but requiredEndPot is still non-zero in that state (DRAW30_PRIZE_RESERVE
+        // plus unreleased VC seed). A seeded zero-OG season therefore never adapted breath and
+        // left the draw-30 reserve undefended (DORM-GATE still protected VC principal, so no
+        // fund loss). Only skip when there is genuinely nothing to defend.
+        if (ogEndgameObligation == 0 && requiredEndPot == 0) return;
         // [v2.01] B-2.00-02: EMA updates unconditionally -- breath override cooldown
         // must not stall revenue tracking. Solver decisions still skip during lock.
         // [v1.58-P3] EMA revenue update: always blend, even zero-revenue draws.
@@ -4884,7 +4480,13 @@ uint256 public dormancyParticipantCount;
         //   immediately, no timelock. Solver output accepted to protect solvency.
         // Immediate release is intentional -- a timelock here would allow further draws
         // at full breath before protection activates, compounding the shortfall.
-        if (currentDraw > INHALE_DRAWS && optimalBreathBps < breathMultiplier) {
+        // [v1.14 / H-06] The exhale floor is a comfort mechanism and must never override a
+        // solvency-driven answer. When the solver returns below breathRailMin it is in
+        // rail-release territory, meaning the floor is genuinely threatened; the pot-health
+        // test below reads the CURRENT pot against requiredEndPot while the solver projects
+        // to draw 30, so the two can disagree and the comfort floor could win. It must not.
+        if (currentDraw > INHALE_DRAWS && optimalBreathBps < breathMultiplier
+            && optimalBreathBps >= breathRailMin) {
             // Integer division truncates: exact 1.2x gives 11999 not 12000.
             // Gate fires ~0.01% earlier than stated threshold. Negligible in practice.
             bool potHealthy = requiredEndPot == 0 ||
@@ -5212,21 +4814,7 @@ uint256 public dormancyParticipantCount;
     // [v1.11b] _vcBonusAmount() removed with the fixed-tier bonus mechanism (its only caller was
     //          getVCBonusStatus(), also removed).
 
-    /// @notice Returns current seed release state for off-chain monitoring.
-    /// @dev    [CRE v0.11 / NS-L-01] Return tags added (was untagged multi-value view).
-    /// @return ratioBps             Current active seedReleaseRatioBps (governance-set).
-    /// @return maxReleasable        CEILING only: cumulativeSeasonTreasury * ratioBps / 10000,
-    ///                              capped at VC_SEED. This IGNORES the SEED_RELEASE_THRESHOLD gate
-    ///                              and the per-draw MAX_SEED_PER_DRAW_BPS cap, so it is an upper
-    ///                              bound, NOT a next-draw release prediction. Actual per-draw
-    ///                              release is computed in _calculatePrizePools() and is typically
-    ///                              lower. Do not use this to forecast the next supplement.
-    /// @return released             Cumulative seed released to date (seedReleased).
-    /// @return remaining            VC_SEED - seedReleased (0 if fully released).
-    /// @return thresholdMet         True if cumulativeSeasonTreasury >= SEED_RELEASE_THRESHOLD
-    ///                              (the gate maxReleasable ignores).
-    /// @return pendingRatio         Pending governance ratio (0 if none pending).
-    /// @return pendingEffectiveTime Timelock expiry for the pending ratio (0 if none).
+    /// @inheritdoc IBullsEthCRE
     function getSeedReleaseStatus() external view returns (
         uint256 ratioBps,
         uint256 maxReleasable,
