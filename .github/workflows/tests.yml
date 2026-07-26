@@ -1,0 +1,73 @@
+name: tests
+
+# Runs the Foundry test suite on every push and pull request.
+# You install nothing. GitHub provides the machine.
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:   # adds a "Run workflow" button so you can trigger it by hand
+
+jobs:
+  forge-test:
+    name: forge test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive   # harmless if you have no submodules
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Show versions
+        run: forge --version
+
+      # If lib/ is committed, this is a no-op and the vendored copies are used.
+      # If lib/ is missing, fetch the three dependencies at PINNED versions.
+      #
+      # openzeppelin-contracts MUST be v4.9.6. Version 5.x replaced the Ownable
+      # string revert ("Ownable: caller is not the owner") with a custom error,
+      # and test/CreSeam.t.sol asserts the 4.x string. Installing latest breaks it.
+      #
+      # chainlink-brownie-contracts tag is "0.8.0" with NO "v" prefix (verified against
+      # the remote tag list; "v0.8.0" does not exist and fails). 0.8.0 provides
+      # contracts/src/v0.8/interfaces/AggregatorV3Interface.sol, which is the path
+      # BullsEthCRE.sol imports. Version 1.3.0 moved it to shared/interfaces and breaks.
+      - name: Ensure dependencies
+        run: |
+          if [ -d "lib/forge-std" ] && [ -d "lib/openzeppelin-contracts" ] && [ -d "lib/chainlink-brownie-contracts" ]; then
+            echo "lib/ present, using vendored dependencies"
+          else
+            echo "lib/ incomplete, installing pinned dependencies"
+            rm -rf lib
+            forge install foundry-rs/forge-std --no-git
+            forge install OpenZeppelin/openzeppelin-contracts@v4.9.6 --no-git
+            forge install smartcontractkit/chainlink-brownie-contracts@0.8.0 --no-git
+          fi
+          echo "--- lib/ contents ---"
+          ls -la lib/ || true
+
+      # NOTE: do NOT add --sizes here. `forge build --sizes` exits 1 when any
+      # contract exceeds the EIP-170 limit, which BullsEthCRE does by design
+      # until the library split. Using it here turns CI red before a single
+      # test runs. Verified: exit code 1.
+      - name: Build
+        run: forge build
+
+      - name: Test
+        run: forge test -vv
+
+      # Prints deployed bytecode size against EIP-170 so the split stays visible
+      # on every run. `|| true` keeps this step from failing the job.
+      - name: Contract size against EIP-170
+        if: always()
+        run: |
+          echo "EIP-170 limit is 24576 bytes of DEPLOYED bytecode."
+          echo "BullsEthCRE is knowingly over this until the library split."
+          forge build --sizes || true
