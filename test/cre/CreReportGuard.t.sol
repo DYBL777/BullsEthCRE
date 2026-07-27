@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {BullsEthBase} from "./BullsEthBase.t.sol";
-import {BullsEth} from "../src/BullsEthCRE.sol";
-import {IBullsEthCRE} from "../src/IBullsEthCRE.sol";
-import {CreReportGuard} from "../src/CreReportGuard.sol";
+import {BullsEthBase} from "../base/BullsEthBase.t.sol";
+import {BullsEth} from "../../src/BullsEthCRE.sol";
+import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
+import {CreReportGuard} from "../../src/CreReportGuard.sol";
 
 /// @notice C-02. The guard that makes BullsEthCRE's `msg.sender == creForwarder` check
 ///         mean something, by putting a contract we control in that slot instead of the

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {BullsEthBase} from "./BullsEthBase.t.sol";
-import {BullsEth} from "../src/BullsEthCRE.sol";
-import {IBullsEthCRE} from "../src/IBullsEthCRE.sol";
+import {BullsEthBase} from "../base/BullsEthBase.t.sol";
+import {BullsEth} from "../../src/BullsEthCRE.sol";
+import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
 
 /// @notice Executable demonstrations of three audit findings against v1.11c/v1.12.
 ///         These tests PASS while the findings are present. Each one asserts the

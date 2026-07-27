@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {BullsEthBase} from "./BullsEthBase.t.sol";
-import {BullsEth} from "../src/BullsEthCRE.sol";
-import {IBullsEthCRE} from "../src/IBullsEthCRE.sol";
+import {BullsEthBase} from "../base/BullsEthBase.t.sol";
+import {BullsEth} from "../../src/BullsEthCRE.sol";
+import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
 
 /// @notice CRE seam (Option B onReport dispatch) behaviour.
 contract CreSeamTest is BullsEthBase {

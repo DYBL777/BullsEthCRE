@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {BullsEthBase} from "./BullsEthBase.t.sol";
-import {BullsEth} from "../src/BullsEthCRE.sol";
-import {MockERC20} from "./mocks/MockERC20.sol";
-import {MockAggregator} from "./mocks/MockAggregator.sol";
-import {MockSequencer} from "./mocks/MockSequencer.sol";
+import {BullsEthBase} from "../base/BullsEthBase.t.sol";
+import {BullsEth} from "../../src/BullsEthCRE.sol";
+import {MockERC20} from "../mocks/MockERC20.sol";
+import {MockAggregator} from "../mocks/MockAggregator.sol";
+import {MockSequencer} from "../mocks/MockSequencer.sol";
 
 /// @title  SmartEarnBase
 /// @notice The VC-enabled harness BullsEthBase asks for in its own header note.

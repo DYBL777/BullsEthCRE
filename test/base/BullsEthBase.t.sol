@@ -2,10 +2,10 @@
 pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
-import {BullsEth} from "../src/BullsEthCRE.sol";
-import {MockERC20} from "./mocks/MockERC20.sol";
-import {MockAggregator} from "./mocks/MockAggregator.sol";
-import {MockSequencer} from "./mocks/MockSequencer.sol";
+import {BullsEth} from "../../src/BullsEthCRE.sol";
+import {MockERC20} from "../mocks/MockERC20.sol";
+import {MockAggregator} from "../mocks/MockAggregator.sol";
+import {MockSequencer} from "../mocks/MockSequencer.sol";
 
 /// @title BullsEthBase
 /// @notice Shared deployment and game-driving helpers for the BullsEth suite.

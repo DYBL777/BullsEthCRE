@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {SmartEarnBase} from "./SmartEarnBase.t.sol";
-import {BullsEth} from "../src/BullsEthCRE.sol";
-import {IBullsEthCRE} from "../src/IBullsEthCRE.sol";
+import {SmartEarnBase} from "../base/SmartEarnBase.t.sol";
+import {BullsEth} from "../../src/BullsEthCRE.sol";
+import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
 
 /// @notice H-06 (breath rail release) and H-04 (VC seniority at close).
 ///

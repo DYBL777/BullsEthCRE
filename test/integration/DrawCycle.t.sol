@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {BullsEthBase} from "./BullsEthBase.t.sol";
-import {BullsEth} from "../src/BullsEthCRE.sol";
-import {IBullsEthCRE} from "../src/IBullsEthCRE.sol";
+import {BullsEthBase} from "../base/BullsEthBase.t.sol";
+import {BullsEth} from "../../src/BullsEthCRE.sol";
+import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
 
 /// @notice End-to-end happy-path draw cycle.
 /// @dev    HAND-TRACED, NOT YET EXECUTED (the Foundry binary host was blocked in the
