@@ -97,13 +97,41 @@ abstract contract SmartEarnBase is BullsEthBase {
 
     /// @dev Runs one full draw: buy, resolve, submit the standard cutoffs, complete.
     ///
-    ///      NOTE, and it is not incidental: every player must RE-SUBMIT a spread
-    ///      prediction each draw. From draw 2 onward a stored prediction is stale, so
-    ///      without this every entry auto-defaults to one identical value, ties at a
-    ///      difference of zero, and the draw becomes unresolvable (finding H-01). The
-    ///      first version of this helper omitted the resubmission and every multi-draw
-    ///      test died on DrawNotProgressing. H-01 is not merely a theoretical brick: it
-    ///      blocks writing multi-draw tests at all until it is worked around.
+    ///      RESUBMISSION IS NOT REQUIRED, and the note that used to sit here was wrong.
+    ///
+    ///      It claimed: "from draw 2 onward a stored prediction is stale, so without this
+    ///      every entry auto-defaults to one identical value, ties at diff zero, and the
+    ///      draw becomes unresolvable (H-01)". That described the contract as it was when
+    ///      this helper was written, during the v1.13 H-02 work, when H-01 was still live.
+    ///      The observed DrawNotProgressing failure was real, against v1.13.
+    ///
+    ///      v1.14's H-01 fix made predictions STANDING: _processMatchesCore rolls a non-zero
+    ///      stored prediction forward, and every player here has one from commitment. So on
+    ///      v1.17 the resubmission is redundant, and the note became false the moment H-01
+    ///      was fixed. Doc drift in the harness, of exactly the kind this project keeps
+    ///      finding in the contract.
+    ///
+    ///      The resubmission is RETAINED, but be clear about why, because the first attempt
+    ///      at this correction got it wrong too. It is NOT needed to keep the diff ladder
+    ///      spread: standing predictions roll every player forward at their own
+    ///      BASE_PREDICTION + i, so the ladder, the diffs, the winners and the cutoff
+    ///      constants are IDENTICAL with or without it. Nothing would need re-deriving.
+    ///
+    ///      The honest reasons it stays: it is harmless, it exercises submitPrediction on
+    ///      every draw rather than only at commitment, and it mimics what an engaged player
+    ///      actually does.
+    ///
+    ///      H-01's standing-prediction path IS covered across a draw boundary, by
+    ///      test_H01_APlayersNumberStandsUntilTheyChangeIt in the regression suite, which
+    ///      runs three draws with no resubmission at all. So dropping the resubmission here
+    ///      would not add regression coverage that is missing.
+    ///
+    ///      CUTOFF PRECONDITIONS. The fixed set (9e6/39e6/99e6, counts 10/40/100) reconciles
+    ///      only because of three fixture properties, and a future edit that breaks any of
+    ///      them will break reconciliation, not obviously:
+    ///        1. casual predictions form the unique BASE_PREDICTION + i ladder
+    ///        2. any OG predictions are parked far outside the t3 band
+    ///        3. everyone buys exactly one ticket, so entries == player count
     function _runStandardDraw() internal {
         for (uint256 i = 0; i < players.length; i++) {
             vm.prank(players[i]);

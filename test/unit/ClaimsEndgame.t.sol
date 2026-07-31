@@ -141,9 +141,14 @@ contract ClaimsEndgameTest is SmartEarnBase {
         bulls.claimPrize();
     }
 
-    /// @notice Prizes accumulate across draws when left unclaimed, rather than the later
-    ///         win overwriting the earlier one.
-    function test_ClaimPrize_AccumulatesAcrossDraws() public {
+    /// @notice HONEST NAME. This proves a prize is never REDUCED by a later draw. It does
+    ///         NOT prove accumulation, because assertGe is satisfied when the player simply
+    ///         does not win again, which is the common case. Proving accumulation needs the
+    ///         same address to win twice, which this fixture cannot guarantee.
+    ///
+    ///         The earlier name claimed accumulation and the assertion did not support it.
+    ///         Recorded as a gap rather than dressed up.
+    function test_ClaimPrize_IsNeverReducedByALaterDraw() public {
         _startCasualsOnly();
         _runStandardDraw();
 
@@ -182,8 +187,16 @@ contract ClaimsEndgameTest is SmartEarnBase {
         _startWithOGs(50);
         _runSeasonAndClose();
 
-        assertGt(bulls.endgamePerOG(), 0, "a per-OG endgame figure was computed");
-        assertGt(bulls.endgameOwed(), 0, "and the total owed is reserved");
+        uint256 perOG = bulls.endgamePerOG();
+        uint256 owed = bulls.endgameOwed();
+        assertGt(perOG, 0, "a per-OG endgame figure was computed");
+
+        // Tightened from a bare `> 0` on the total. The real invariant is structural: the
+        // reserved total must be an exact whole number of per-OG shares, since every
+        // qualified OG is paid the identical figure. A remainder would mean the reserve and
+        // the share had drifted apart.
+        assertEq(owed % perOG, 0, "total owed is an exact multiple of the per-OG share");
+        assertGe(owed, perOG, "and covers at least one claimant");
     }
 
     /// @notice The endgame payout must be capped at the targeted return rather than
@@ -194,6 +207,9 @@ contract ClaimsEndgameTest is SmartEarnBase {
         _runSeasonAndClose();
 
         uint256 maxTarget = OG_UPFRONT_COST * bulls.MAX_TARGET_RETURN_BPS() / 10000;
+        // Bound it on BOTH sides. assertLe alone is satisfied by zero, so a contract that
+        // paid OGs nothing would have passed the cap test.
+        assertGt(bulls.endgamePerOG(), 0, "OGs are actually paid something");
         assertLe(bulls.endgamePerOG(), maxTarget, "never exceeds the maximum targeted return");
     }
 
@@ -269,7 +285,13 @@ contract ClaimsEndgameTest is SmartEarnBase {
         _runSeasonAndClose();
 
         uint256 owed = bulls.vcReturnOwed();
-        assertGt(owed, 0, "the investor is owed something at settlement");
+        // Tightened from `> 0`. At minimum the investor is owed their unreleased seed, which
+        // is exactly computable. A bare positive would have passed on a single wei.
+        assertGe(
+            owed,
+            VC_SEED - bulls.seedReleased(),
+            "at least the unreleased seed is owed"
+        );
 
         uint256 before = usdc.balanceOf(vcWallet);
         bulls.claimVCReturn();
@@ -286,11 +308,24 @@ contract ClaimsEndgameTest is SmartEarnBase {
         _runSeasonAndClose();
 
         address stranger = _newFundedPlayer(98003);
+        uint256 owed = bulls.vcReturnOwed();
         uint256 before = usdc.balanceOf(vcWallet);
+        uint256 strangerBefore = usdc.balanceOf(stranger);
         vm.prank(stranger);
         bulls.claimVCReturn();
 
-        assertGt(usdc.balanceOf(vcWallet) - before, 0, "a stranger can trigger it, funds still go to the VC");
+        // Exact, not `> 0`. The point is that a stranger triggering it changes WHERE nothing
+        // and HOW MUCH nothing: the full amount still reaches the immutable destination.
+        assertEq(
+            usdc.balanceOf(vcWallet) - before,
+            owed,
+            "a stranger can trigger it, and the full amount still goes to the VC"
+        );
+        assertEq(
+            usdc.balanceOf(stranger),
+            strangerBefore,
+            "and the caller gains nothing by triggering it"
+        );
     }
 
     function test_ClaimVcReturn_RevertsOnSecondCall() public {

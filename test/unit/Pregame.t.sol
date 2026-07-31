@@ -237,7 +237,7 @@ contract PregameTest is BullsEthBase {
     //  cancelOGRegistration()
     // ══════════════════════════════════════════════════════════════════════
 
-    function test_CancelOG_RefundsInFullAndDecrementsCount() public {
+    function test_CancelOG_RefundsSeventyFivePercentAndDecrementsCount() public {
         address og = _newFundedPlayer(1);
         vm.prank(og);
         bulls.register();
@@ -316,12 +316,18 @@ contract PregameTest is BullsEthBase {
         bulls.seedPot();
     }
 
-    /// @dev VC_SEED is zero in this harness, so seedPot has nothing to deposit. The point
-    ///      of the test is that the owner gate is real; the funded path lives in the
-    ///      SmartEarn harness where the seed is non-zero.
-    function test_SeedPot_OwnerGateIsTheOnlyGuardHere() public {
-        assertEq(bulls.VC_SEED(), 0, "unseeded harness");
-    }
+    // REMOVED: test_SeedPot_OwnerGateIsTheOnlyGuardHere.
+    //
+    // It asserted only that VC_SEED == 0, which is a property of this harness rather than
+    // of seedPot. The name claimed to test the owner gate and the body never called
+    // seedPot at all. The owner gate is genuinely covered by
+    // test_SeedPot_RevertsForNonOwner above.
+    //
+    // COVERAGE GAP, stated rather than papered over: seedPot's SUCCESSFUL path is not
+    // tested anywhere in this file, because VC_SEED is zero in this harness so there is
+    // nothing to deposit. It is exercised in the SmartEarn harness setUp, which calls
+    // seedPot with a live $100k seed, but that is a fixture rather than an assertion.
+    // A direct test of the funded path is owed.
 
     // ══════════════════════════════════════════════════════════════════════
     //  proposeStartGame() / cancelStartGameProposal()
@@ -431,8 +437,18 @@ contract PregameTest is BullsEthBase {
         ethFeed.pushRound(ETH_PRICE);
         bulls.startGame();
 
-        assertGt(bulls.requiredEndPot(), 0, "endgame floor locked at start");
-        assertGt(bulls.ogEndgameObligation(), 0, "OG obligation locked at start");
+        // `> 0` was the first version and it is a near-worthless bound: it would pass on
+        // 1 wei. Both figures are computable, so assert them exactly.
+        //
+        // One upfront OG, so the OG ratio is far under 20% and the target return is at its
+        // maximum. requiredEndPot = obligation * targetReturn + DRAW30_PRIZE_RESERVE, with
+        // no VC term because VC_SEED is zero in this harness.
+        uint256 expectedObligation = 1 * OG_UPFRONT_COST;
+        assertEq(bulls.ogEndgameObligation(), expectedObligation, "obligation is the gross stake");
+
+        uint256 expectedFloor = expectedObligation * bulls.MAX_TARGET_RETURN_BPS() / 10000
+            + bulls.DRAW30_PRIZE_RESERVE();
+        assertEq(bulls.requiredEndPot(), expectedFloor, "endgame floor computed exactly");
     }
 
     function test_StartGame_RevertsOnSecondCall() public {
@@ -565,8 +581,11 @@ contract PregameTest is BullsEthBase {
     function test_Invariant_BalanceEqualsPotPlusTreasury() public {
         _assertBalanceInvariant("empty");
 
-        // OG caps are a percentage of committedPlayerCount (10% upfront, 18% total), so a
-        // base of committed players is needed before any OG can register.
+        // A base of committed players is bootstrapped so the fixture resembles a real
+        // pregame. NOTE: this is NOT required by a cap. An earlier comment here claimed
+        // "OG caps are a percentage of committedPlayerCount (10% upfront, 18% total)", which
+        // is false: registerAsOG carries no cap check at all, and getOGCapInfo's upfrontMax
+        // is informational. The bootstrap is harmless, the old rationale was not true.
         _bootstrapCommitted(100);
         _assertBalanceInvariant("after 100 commitments");
 

@@ -28,6 +28,15 @@ contract DormancyTest is BullsEthBase {
     address internal ogB;
     address internal wog;
 
+    /// @dev Computed expectations, so assertions can be exact rather than `> 0`.
+    ///      Net of the non-refundable treasury slice in each case.
+    function _ogNetPrincipal() internal view returns (uint256) {
+        return OG_UPFRONT_COST * (10000 - bulls.UF_OG_TREASURY_BPS()) / 10000;   // $450
+    }
+    function _casualNet() internal view returns (uint256) {
+        return TICKET_PRICE * (10000 - TREASURY_BPS) / 10000;                    // $7.50
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────
 
     /// @dev activateDormancy needs BOTH the 24h timelock elapsed AND picks closed
@@ -172,7 +181,13 @@ contract DormancyTest is BullsEthBase {
         _startWithAllClasses();
         _buyAllPlayers(1);
         _proposeAndActivate();
-        assertGt(bulls.dormancyOGPool(), 0, "OG pool funded, two upfront OGs are owed principal");
+        // `> 0` was the first version and would pass on 1 wei. Two upfront OGs, zero draws
+        // played, so each is owed their FULL net principal pro-rata by 30/30 unplayed.
+        assertEq(
+            bulls.dormancyOGPool(),
+            2 * _ogNetPrincipal(),
+            "OG pool is exactly two full net principals"
+        );
         assertEq(bulls.dormancyOGPool(), bulls.dormancyOGPoolSnapshot(), "snapshot matches at activation");
     }
 
@@ -180,7 +195,14 @@ contract DormancyTest is BullsEthBase {
         _startWithAllClasses();
         _buyAllPlayers(1);
         _proposeAndActivate();
-        assertGt(bulls.dormancyCasualRefundPool(), 0, "casuals bought this draw, so are owed");
+        // Tightened from `> 0`. 500 casuals each bought one ticket this draw, so the pool
+        // must cover at least their combined net cost. Asserted as a floor rather than an
+        // equality because the weekly OG's current-draw cost also routes through this pool.
+        assertGe(
+            bulls.dormancyCasualRefundPool(),
+            MIN_PLAYERS_TO_START * _casualNet(),
+            "casual pool covers 500 net ticket costs at minimum"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -205,7 +227,12 @@ contract DormancyTest is BullsEthBase {
         bulls.claimDormancyRefund();
         uint256 got = usdc.balanceOf(ogA) - before;
 
-        assertGt(got, 0, "OG refunded");
+        // Tightened from `> 0`, which spanned everything from 1 wei to $599.99. Zero draws
+        // played, so this OG is owed their full net principal, plus ANY per-head slice of
+        // the remainder, which is zero in this fixture because the pot is consumed exactly
+        // by the OG and casual pools. So net principal is a hard floor and the gross stake a
+        // hard ceiling.
+        assertGe(got, _ogNetPrincipal(), "at least the full net principal");
         // Treasury slice is non-refundable, so a full-season stake never returns whole.
         assertLt(got, OG_UPFRONT_COST, "treasury slice is not refunded");
     }
@@ -246,7 +273,13 @@ contract DormancyTest is BullsEthBase {
         uint256 before = usdc.balanceOf(wog);
         vm.prank(wog);
         bulls.claimDormancyRefund();
-        assertGt(usdc.balanceOf(wog) - before, 0, "weekly OG refunded for the live draw");
+        // A weekly OG pays for two entries at registration, so their current-draw net cost
+        // is two tickets less treasury. Tightened from `> 0`.
+        assertGe(
+            usdc.balanceOf(wog) - before,
+            2 * _casualNet(),
+            "at least the net cost of the two entries they hold in the voided draw"
+        );
     }
 
     /// BRANCH 3: casual who bought this draw.
@@ -259,7 +292,11 @@ contract DormancyTest is BullsEthBase {
         uint256 before = usdc.balanceOf(c);
         vm.prank(c);
         bulls.claimDormancyRefund();
-        assertGt(usdc.balanceOf(c) - before, 0, "casual refunded for the live draw");
+        assertGe(
+            usdc.balanceOf(c) - before,
+            _casualNet(),
+            "at least the net cost of the ticket in the voided draw"
+        );
     }
 
     /// BRANCH 4: committed but never played. Different pool, different rule.
@@ -272,7 +309,11 @@ contract DormancyTest is BullsEthBase {
         uint256 before = usdc.balanceOf(c);
         vm.prank(c);
         bulls.claimDormancyRefund();
-        assertGt(usdc.balanceOf(c) - before, 0, "commitment refunded");
+        assertGe(
+            usdc.balanceOf(c) - before,
+            _casualNet(),
+            "at least the net commitment they never got to play"
+        );
     }
 
     function test_Claim_RevertsForAStranger() public {
@@ -323,11 +364,16 @@ contract DormancyTest is BullsEthBase {
     }
 
     function _assertSolventForPools(string memory whenLabel) internal view {
+        // treasuryBalance is included deliberately. An earlier version summed the five
+        // pools only while the @dev above claimed "pools plus treasury", so the assertion
+        // was weaker than its own description. Including it is the stronger invariant and
+        // it should hold: after activation the balance is exactly pools plus treasury.
         uint256 owed = bulls.dormancyVCPool()
             + bulls.dormancyOGPool()
             + bulls.dormancyCasualRefundPool()
             + bulls.dormancyCommitmentPool()
-            + bulls.dormancyPerHeadPool();
+            + bulls.dormancyPerHeadPool()
+            + bulls.treasuryBalance();
         assertGe(
             usdc.balanceOf(address(bulls)),
             owed,
