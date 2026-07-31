@@ -55,6 +55,13 @@ contract CreReportGuardTest is BullsEthBase {
         return abi.encode(uint8(4), abi.encode(uint256(0))); // ACTION_PRUNE
     }
 
+    /// @dev ACTION_ADVANCE. Deliberately INVALID in PREGAME, which is what makes it a probe:
+    ///      if it reaches the game the game reverts, so the revert tells us a relay happened
+    ///      and silence tells us it did not.
+    function _advanceReport() internal pure returns (bytes memory) {
+        return abi.encode(uint8(2), bytes(""));
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     //  Access control
     // ══════════════════════════════════════════════════════════════════════
@@ -76,18 +83,22 @@ contract CreReportGuardTest is BullsEthBase {
     //  RECORD mode: learn the envelope without exposing the game
     // ══════════════════════════════════════════════════════════════════════
 
+    /// @dev The non-forwarding claim is proved by the game's OWN revert, not by inspecting
+    ///      wiring. An earlier version asserted `bulls.creForwarder() == guard`, which proves
+    ///      the wiring exists and says nothing about whether a relay happened.
+    ///
+    ///      The probe: an ADVANCE report is invalid in PREGAME, and the guard's relay is a
+    ///      direct external call, so a relay would bubble GameNotActive. Silence therefore
+    ///      proves nothing was forwarded. Unfakeable in a way the wiring check was not.
     function test_RecordMode_StoresMetadataAndDoesNotForwardByDefault() public {
         assertEq(uint256(guard.mode()), uint256(CreReportGuard.Mode.RECORD), "RECORD is the default");
         assertFalse(guard.forwardWhileRecording(), "and it does not relay by default");
 
         vm.prank(chainlinkForwarder);
-        guard.onReport(OUR_META, _pruneReport());
+        guard.onReport(OUR_META, _advanceReport()); // must NOT revert: nothing reached the game
 
         assertEq(guard.lastMetadata(), OUR_META, "the real envelope is now readable on-chain");
         assertEq(guard.reportCount(), 1);
-
-        // The game was never touched. This is what makes RECORD safe to run anywhere.
-        assertEq(bulls.creForwarder(), address(guard), "wiring is live");
     }
 
     function test_RecordMode_RecordsEvenAStrangersEnvelope() public {
@@ -98,11 +109,15 @@ contract CreReportGuardTest is BullsEthBase {
         assertEq(guard.lastMetadata(), THEIR_META);
     }
 
+    /// @dev The mirror image. reportCount was the earlier assertion and it increments
+    ///      before the mode branch, so it rose whether or not the relay happened. Here the
+    ///      game's revert IS the proof: GameNotActive can only reach us if the call was
+    ///      actually forwarded.
     function test_RecordMode_CanRelayWhenExplicitlyEnabled() public {
         guard.setForwardWhileRecording(true);
         vm.prank(chainlinkForwarder);
-        guard.onReport(OUR_META, _pruneReport()); // reaches the game, no revert
-        assertEq(guard.reportCount(), 1);
+        vm.expectRevert(IBullsEthCRE.GameNotActive.selector);
+        guard.onReport(OUR_META, _advanceReport()); // reverting proves the relay fired
     }
 
     // ══════════════════════════════════════════════════════════════════════

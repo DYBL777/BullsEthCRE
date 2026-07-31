@@ -19,6 +19,27 @@ import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
 /// ratio ceiling of $0, producing a $1,940.46 obligation against a $1,250.00
 /// treasury. A $690.46 shortfall after a single draw.
 contract SmartEarnH02Test is SmartEarnBase {
+    // COVERAGE LIMIT, stated rather than left silent.
+    //
+    // Every test in this file runs with seedReleased == 0 throughout, so the ratio
+    // invariant and the fundability assertion are only ever checked AT ZERO. That means
+    // the fix's NEGATIVE half is genuinely pinned (no release without treasury backing,
+    // proven by the draw-1 test, which fails on pre-fix code that released ~$1,552) while
+    // the POSITIVE half is not: a release that DOES happen, staying inside the ceiling and
+    // remaining fundable, is never exercised here.
+    //
+    // Why it is not reachable at this fixture's scale. The T3 cold-start top-up only fires
+    // while currentDraw <= WITHDRAW_START_DRAW (5) AND T3 pays under TICKET_PRICE per
+    // winner. With VC_SEED at $100k the pot is large from draw 1, so the weekly pool keeps
+    // T3 comfortably above $10 a winner and the top-up never triggers in draws 2-5. Forcing
+    // it needs a purpose-built harness with a much smaller seed or a far wider T3 winner
+    // band, which is a new fixture rather than a tweak to this one.
+    //
+    // OWED: that fixture. Until it exists, the positive path rests on the constructor bound
+    // arithmetic (verified: 6349 passes, 6350 reverts) plus the assertion that these
+    // invariants WOULD fire on a non-zero release if one occurred. That is weaker than a
+    // test and is recorded as such.
+
     /// @dev The single assertion everything else exists to protect.
     function _assertRatioInvariant(string memory whenLabel) internal view {
         assertLe(

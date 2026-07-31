@@ -8,8 +8,10 @@ import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
 /// @notice Deployment and genesis-state invariants.
 contract DeployTest is BullsEthBase {
     function test_Deploy_Version() public view {
-        // [v1.12] Version string is deliberately still v1.11b: changing it would alter bytecode
-        // and destroy the comment-only identity proof. Update when a code change lands.
+        // Version string tracks the contract. It was frozen at v1.11b through v1.12 to
+        // preserve that release's bytecode-identity proof, then bumped at v1.13 when a code
+        // change landed. The old note claiming it is "deliberately still v1.11b" sat above
+        // an assertion of v1.17 for four versions.
         assertEq(bulls.getContractVersion(), "BullsEthCRE_v1.17");
     }
 

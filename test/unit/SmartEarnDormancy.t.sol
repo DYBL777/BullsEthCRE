@@ -267,11 +267,15 @@ contract SmartEarnDormancyTest is SmartEarnBase {
     }
 
     function _assertSolvent(string memory whenLabel) internal view {
+        // Includes treasuryBalance, matching Dormancy.t.sol. The two helpers had diverged:
+        // this one summed pools only while its sibling included treasury, so the same-named
+        // invariant meant two different things in two files.
         uint256 owed = bulls.dormancyVCPool()
             + bulls.dormancyOGPool()
             + bulls.dormancyCasualRefundPool()
             + bulls.dormancyCommitmentPool()
-            + bulls.dormancyPerHeadPool();
+            + bulls.dormancyPerHeadPool()
+            + bulls.treasuryBalance();
         assertGe(
             usdc.balanceOf(address(bulls)),
             owed,

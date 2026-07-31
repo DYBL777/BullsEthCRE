@@ -9,5 +9,11 @@ optimizer_runs = 200
 via_ir = true            # BullsEth needs the IR pipeline (stack too deep otherwise)
 fs_permissions = [{ access = "read", path = "./"}]
 
+# Restores the 2,000-run figure the H-06 fuzz results were originally measured at.
+# Without this, forge uses its default of 256, so the historical claim did not match
+# what CI actually executed.
+[profile.default.fuzz]
+runs = 2000
+
 [fmt]
 line_length = 120

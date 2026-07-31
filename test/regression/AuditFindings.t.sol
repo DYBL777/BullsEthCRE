@@ -6,10 +6,18 @@ import {BullsEth} from "../../src/BullsEthCRE.sol";
 import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
 
 /// @notice Executable demonstrations of three audit findings against v1.11c/v1.12.
-///         These tests PASS while the findings are present. Each one asserts the
-///         broken behaviour, so when a fix lands the test fails and must be rewritten
-///         to assert the corrected behaviour. That inversion is deliberate: it is the
-///         difference between "we think this is a bug" and "here it is, running".
+///         MIXED STYLE. Read each section's own comment rather than assuming, because
+///         this header used to claim all three were in the passes-while-present style and
+///         that is no longer true:
+///
+///           H-01 and C-01: REWRITTEN after their fixes landed. They assert the CORRECTED
+///           behaviour and FAIL on pre-v1.14 / pre-v1.15 code. Both findings are CLOSED.
+///
+///           H-05: still in the original style, asserting the BROKEN behaviour, because the
+///           code half of that finding is still OPEN. When it is fixed these tests will
+///           fail and must be rewritten to assert the correction. That inversion is
+///           deliberate: it is the difference between "we think this is a bug" and "here it
+///           is, running".
 ///
 ///         H-05  keeper entry-count spec does not match the implementation
 ///         H-01  auto-default tie cluster makes a draw structurally unresolvable
@@ -119,25 +127,22 @@ contract AuditFindingsTest is BullsEthBase {
         (, , , bool statusLostAfter, , , , , , , , , , ) = bulls.getPlayerInfo(wog);
         assertTrue(statusLostAfter, "status is only lost DURING matching");
 
-        // The OG's predictions were BASE_PREDICTION + 1000, far outside every cutoff,
-        // so they could never have won. The point is the count, so re-run the same
-        // draw shape and compare the entry universe instead.
-        uint256 actualEntriesForThisOG = 0; // it hit `continue` before _matchAndCategorize
-
-        assertEq(
-            keeperCountsForThisOG,
-            2,
-            "documented spec instructs the keeper to count 2 entries"
-        );
-        assertEq(
-            actualEntriesForThisOG,
-            0,
-            "implementation produced 0 entries for the same player"
-        );
-        assertTrue(
-            keeperCountsForThisOG != actualEntriesForThisOG,
-            "H-05: spec and implementation disagree by 2 entries per non-buying weekly OG"
-        );
+        // REMOVED: three asserts that compared hardcoded locals to themselves
+        // (assertEq(2,2), assertEq(0,0), assertTrue(2 != 0)). They read like measurement
+        // and measured nothing, so they could never fail. An external audit called them
+        // decorative and was right.
+        //
+        // THE LOAD-BEARING ASSERTIONS ARE THE FLAG CHOREOGRAPHY ABOVE, and they are what
+        // actually pins H-05:
+        //   isWeeklyOG == true and statusLost == FALSE at submission time, which is when a
+        //     keeper reads state, so the documented rule tells it to count 2 entries;
+        //   statusLost == TRUE only AFTER matching, because _processMatchesCore sets the
+        //     flag and then `continue`s before _matchAndCategorize, so the same player
+        //     produces 0 entries;
+        //   snapshotTotalEntries == 502, so the contract's own denominator counts those 2.
+        //
+        // Those three, in that order, are the finding. The keeper is instructed to count
+        // entries that the implementation never creates.
     }
 
     /// @dev The sharper half of H-05: the over-count is real money, not bookkeeping.

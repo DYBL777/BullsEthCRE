@@ -16,10 +16,10 @@ import {MockSequencer} from "../mocks/MockSequencer.sol";
 ///         The test contract itself is the deployer, so it is owner(). Owner-only
 ///         calls are therefore made directly from the test; player calls use vm.prank.
 ///
-///         NOTE: this harness could not be executed inside the environment it was
-///         written in (the Foundry binary host was blocked). The numbers in the draw
-///         cycle were hand-traced. An engineer should run `forge test` first and treat
-///         any failure as a fixture-tuning task, not a contract bug, until proven otherwise.
+///         EXECUTED. This harness was written before a Foundry binary was available and
+///         carried a note advising that any failure be treated as fixture tuning rather
+///         than a contract bug. That caveat is retired: the suite runs green in CI and in
+///         two independent sandboxes, so a failure here now means something.
 abstract contract BullsEthBase is Test {
     BullsEth internal bulls;
     MockERC20 internal usdc;

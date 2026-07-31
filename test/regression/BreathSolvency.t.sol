@@ -41,10 +41,15 @@ contract BreathSolvencyTest is SmartEarnBase {
     }
 
     /// @dev Mirror of _solveGeometricBps AFTER the H-06 fix.
+    ///      DRIFT CORRECTED: this branch read `return RAIL_MIN` until an external audit
+    ///      caught it. v1.17's L-03 changed the contract to `return 0`. The fuzz results
+    ///      were unaffected because the bounds make this branch unreachable, but the
+    ///      header's claim of line-for-line transcription was false while it stood, which
+    ///      is precisely the silent divergence this file warns is worse than no fuzz.
     function _solveFixed(uint256 pot, uint256 drawsLeft, uint256 floorV, uint256 rev)
         internal pure returns (uint256)
     {
-        if (drawsLeft == 0 || pot == 0) return RAIL_MIN;
+        if (drawsLeft == 0 || pot == 0) return 0;
         uint256 projEnd = pot + rev * drawsLeft;
         if (projEnd <= floorV) return 0; // was: RAIL_MIN
         uint256 lo = 0;
@@ -142,7 +147,10 @@ contract BreathSolvencyTest is SmartEarnBase {
     // all, because it looks like coverage.
     //
     // checkSolvency() is external and calls the REAL _simGeomPot, so it can be used to
-    // pin the mirror. This test reconstructs checkSolvency's whole calculation from
+    // pin the mirror. LIMIT, stated plainly: this guard pins _simGeom ONLY. checkSolvency
+    // calls _simGeomPot directly and never _solveGeometricBps, so the solver mirror's
+    // control flow is pinned by REVIEW, not by this guard. An external audit caught a
+    // drifted branch there that this guard could not have seen. This test reconstructs checkSolvency's whole calculation from
     // public state using _simGeom, and asserts it agrees with the contract. If the two
     // implementations ever drift, this fails and the fuzz results become suspect.
 

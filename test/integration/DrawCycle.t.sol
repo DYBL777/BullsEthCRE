@@ -6,8 +6,9 @@ import {BullsEth} from "../../src/BullsEthCRE.sol";
 import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
 
 /// @notice End-to-end happy-path draw cycle.
-/// @dev    HAND-TRACED, NOT YET EXECUTED (the Foundry binary host was blocked in the
-///         authoring environment). The distribution is engineered so the cutoff maths
+/// @dev    EXECUTED. The figures below were hand-derived before a Foundry binary was
+///         available and are now confirmed by execution, green in CI and in two
+///         independent sandboxes. The distribution is engineered so the cutoff maths
 ///         is deterministic:
 ///           - player i commits prediction (BASE_PREDICTION + i)
 ///           - resolved price is exactly BASE_PREDICTION * 1e6 (= 3000e8)
@@ -34,7 +35,6 @@ contract DrawCycleTest is BullsEthBase {
         assertEq(bulls.snapshotTotalEntries(), 500);
         _assertSolvent();
 
-        // Submit the hand-traced cutoffs. diff_i = i * 1e6.
         // t1: i<=9  -> 10 winners; t2: i<=39 -> 40; t3: i<=99 -> 100.
         bulls.submitCutoffDiffs(9e6, 39e6, 99e6, 10, 40, 100);
         assertEq(uint256(bulls.drawPhase()), uint256(IBullsEthCRE.DrawPhase.MATCHING));
