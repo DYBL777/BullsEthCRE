@@ -29,6 +29,15 @@ contract SmartEarnDormancyTest is SmartEarnBase {
 
     address internal ogA;
 
+    /// @dev Computed expectations so payout assertions can be exact rather than `> 0`.
+    ///      Net of the non-refundable treasury slice, matching Dormancy.t.sol.
+    function _ogNetPrincipal() internal view returns (uint256) {
+        return OG_UPFRONT_COST * (10000 - bulls.UF_OG_TREASURY_BPS()) / 10000;
+    }
+    function _casualNet() internal view returns (uint256) {
+        return TICKET_PRICE * (10000 - TREASURY_BPS) / 10000;
+    }
+
     function _proposeAndActivate() internal {
         bulls.proposeDormancy();
         vm.warp(bulls.lastDrawTimestamp() + PICK_DEADLINE + 1);
@@ -172,7 +181,14 @@ contract SmartEarnDormancyTest is SmartEarnBase {
         uint256 before = usdc.balanceOf(ogA);
         vm.prank(ogA);
         bulls.claimDormancyRefund();
-        assertGt(usdc.balanceOf(ogA) - before, 0, "OG refunded from TIER 1");
+        // Tightened from `> 0`, which is the exact shape this suite condemns elsewhere:
+        // it spans one wei to the whole stake. Zero draws played, so this OG is owed their
+        // full net principal as a hard floor.
+        assertGe(
+            usdc.balanceOf(ogA) - before,
+            _ogNetPrincipal(),
+            "at least the full net principal from TIER 1"
+        );
     }
 
     function test_Claim_CasualStillPaidWithASeedInPlay() public {
@@ -184,7 +200,11 @@ contract SmartEarnDormancyTest is SmartEarnBase {
         uint256 before = usdc.balanceOf(c);
         vm.prank(c);
         bulls.claimDormancyRefund();
-        assertGt(usdc.balanceOf(c) - before, 0, "casual refunded from TIER 2");
+        assertGe(
+            usdc.balanceOf(c) - before,
+            _casualNet(),
+            "at least the net cost of the ticket in the voided draw, from TIER 2"
+        );
     }
 
     /// @notice The VC is not a claimant. Their seed is returned through the settlement
@@ -211,7 +231,11 @@ contract SmartEarnDormancyTest is SmartEarnBase {
         _proposeAndActivate();
 
         uint256 reserved = bulls.dormancyVCPool();
-        assertGt(reserved, 0, "something is owed");
+        assertEq(
+            reserved,
+            VC_SEED - bulls.seedReleased(),
+            "TIER 0 reserves exactly the unreleased seed"
+        );
 
         vm.warp(block.timestamp + DORMANCY_CLAIM_WINDOW + 1);
         bulls.sweepDormancyRemainder();
