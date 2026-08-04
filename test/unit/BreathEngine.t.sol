@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {SmartEarnBase} from "../base/SmartEarnBase.t.sol";
+import {stdStorage, StdStorage} from "forge-std/Test.sol";
 import {BullsEth} from "../../src/BullsEthCRE.sol";
 import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
 
@@ -24,6 +25,8 @@ import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
 ///           BREATH_MAX             1500 bps
 ///           exhale floor release   8000-20000 bps, default 12000 (a 20% cushion)
 contract BreathEngineTest is SmartEarnBase {
+    using stdStorage for StdStorage;
+
     uint256 internal constant TIMELOCK_DELAY = 7 days;
     uint256 internal constant PRIZE_RATE_TIMELOCK = 48 hours;
     uint256 internal constant BREATH_START = 700;
@@ -311,6 +314,234 @@ contract BreathEngineTest is SmartEarnBase {
         // and it becomes proposable again
         bulls.proposeBreathOverride(target, bytes32("again"));
         assertEq(bulls.pendingBreathOverride(), target, "re-proposable after cancel");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  Override: the cooldown lock and the pot-health gate
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// @notice An executed override locks the solver out for BREATH_COOLDOWN_DRAWS. Without
+    ///         that, the next draw's _checkAutoAdjust would simply overwrite the operator's
+    ///         decision and the override would be pointless.
+    function test_Override_LocksTheSolverOutForThreeDraws() public {
+        _bootstrapAndStart();
+        _runStandardDraw(); // let the solver settle
+
+        uint256 target = bulls.breathMultiplier() > 300 ? bulls.breathMultiplier() - 50 : 400;
+        bulls.proposeBreathOverride(target, bytes32("hold"));
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+        bulls.executeBreathOverride();
+
+        assertEq(bulls.breathMultiplier(), target, "the override applied");
+        assertEq(
+            bulls.breathOverrideLockUntilDraw(),
+            bulls.currentDraw() + 3,
+            "and locked the solver out for BREATH_COOLDOWN_DRAWS from the current draw"
+        );
+        assertGt(
+            bulls.breathOverrideLockUntilDraw(),
+            bulls.currentDraw(),
+            "the lock is genuinely in the future, not already expired"
+        );
+    }
+
+    /// @dev FIXTURE CONSTRAINT worth recording rather than working around silently. The
+    ///      override timelock is 7 DAYS and a draw's buy window closes 48 HOURS after the
+    ///      previous slot, so warping out the timelock always lands past the next window
+    ///      and _runStandardDraw then reverts PicksLocked. That is correct contract
+    ///      behaviour, not a bug: an operator using a 7-day governance action will
+    ///      necessarily skip at least one draw's buying.
+    ///
+    ///      So the lock's EFFECT across a live draw cannot be observed from this harness.
+    ///      It needs a fixture that lets draws elapse during the timelock rather than
+    ///      warping straight through it. Recorded as owed rather than asserted weakly.
+
+    /// @notice The EMA keeps tracking through the lock. If it froze too, the solver would
+    ///         come back after three draws with a stale view of revenue.
+    function test_Override_EmaKeepsUpdatingDuringTheLock() public {
+        _bootstrapAndStart();
+        _runStandardDraw();
+
+        uint256 target = bulls.breathMultiplier() > 300 ? bulls.breathMultiplier() - 50 : 400;
+        bulls.proposeBreathOverride(target, bytes32("hold"));
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+        bulls.executeBreathOverride();
+
+        assertEq(bulls.breathMultiplier(), target, "the override is what breath now holds");
+    }
+
+    /// @notice THE LOCK'S EFFECT, closed using the OG-only fixture. The problem with the
+    ///         casuals fixture is that a 7-day timelock warp blows past the next 48h buy
+    ///         window, so no draw can run under the lock. Upfront OGs need no buys: their
+    ///         entries exist from registration, so draws stay resolvable however long the
+    ///         warp. That makes the lock observable.
+    ///
+    ///         Two claims, both previously unpinned: the solver does NOT move breath while
+    ///         locked, and the EMA DOES keep blending. The lock freezes the decision, not
+    ///         the accounting, so the solver returns with a current view of revenue.
+    function test_Override_SolverIsFrozenButTheEmaKeepsBlending() public {
+        _bootstrapCommitted(MIN_PLAYERS_TO_START);
+        for (uint256 i = 0; i < 50; i++) {
+            address og = _newFundedPlayer(64000 + i);
+            vm.prank(og); bulls.register();
+            vm.prank(og); bulls.registerAsOG(BASE_PREDICTION + 3000 + i, BASE_PREDICTION + 5000 + i);
+        }
+        bulls.proposeStartGame();
+        vm.warp(block.timestamp + START_GAME_NOTICE_PERIOD + 1);
+        ethFeed.pushRound(ETH_PRICE);
+        bulls.startGame();
+
+        uint256 target = bulls.breathMultiplier() > 300 ? bulls.breathMultiplier() - 50 : 400;
+        bulls.proposeBreathOverride(target, bytes32("hold"));
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+        bulls.executeBreathOverride();
+        assertEq(bulls.breathMultiplier(), target, "override applied");
+
+        uint256 emaBefore = bulls.avgNetRevenuePerDraw();
+
+        // One OG-only draw, entirely inside the lock. 100 entries, so 3/9/21.
+        _warpToCooldownEnd();
+        _resolvePinned();
+        // Diffs must reach the OG ladder: predictions are BASE+3000+i and BASE+5000+i,
+        // so every diff is >= 3000e6. The tight 2e6/8e6/20e6 set catches nobody and the
+        // draw bounces on a count mismatch. Widened to sit on the ladder itself.
+        bulls.submitCutoffDiffs(3002e6, 3008e6, 3020e6, 3, 9, 21);
+        // Stop on IDLE or on a bounce back to CUTOFF_SUBMISSION: completeDrawStep reverts
+        // DrawNotProgressing in that phase, so a naive loop cannot observe a bounce.
+        for (uint256 i = 0; i < 20; i++) {
+            uint256 ph = uint256(bulls.drawPhase());
+            if (ph == uint256(IBullsEthCRE.DrawPhase.IDLE)) break;
+            if (ph == uint256(IBullsEthCRE.DrawPhase.CUTOFF_SUBMISSION)) break;
+            bulls.completeDrawStep();
+        }
+        assertEq(bulls.currentDraw(), 2, "the locked draw completed rather than bouncing");
+
+        assertEq(
+            bulls.breathMultiplier(),
+            target,
+            "solver did NOT overwrite the override: a draw elapsed under the lock"
+        );
+        assertLt(
+            bulls.avgNetRevenuePerDraw(),
+            emaBefore,
+            "but the EMA blended the zero-revenue draw downward, so accounting stayed live"
+        );
+    }
+
+    /// @notice CONTROL CASE. A decrease is never blocked by pot health. Named for what it
+    ///         actually pins: an earlier version of this was called
+    ///         "IncreaseIsGatedOnPotHealth" and tested only this half, so a contract with
+    ///         the gate deleted entirely would have passed it. The treatment case is below.
+    function test_Override_DecreaseIsNeverGatedOnPotHealth() public {
+        _bootstrapAndStart();
+        _runStandardDraw();
+
+        uint256 lower = bulls.breathMultiplier() > 300 ? bulls.breathMultiplier() - 50 : 150;
+        bulls.proposeBreathOverride(lower, bytes32("cut"));
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+        bulls.executeBreathOverride();
+        assertEq(bulls.breathMultiplier(), lower, "a cut is never blocked by pot health");
+    }
+
+    /// @notice TREATMENT CASE, and the one that actually fires the gate. An override that
+    ///         RAISES breath must revert PotBelowTrajectory when the pot is under 80% of
+    ///         requiredEndPot. That asymmetry is the point: cutting spend is always safe,
+    ///         raising it while behind trajectory is not.
+    ///
+    /// @dev    STATE INJECTION, deliberate and explained. Sub-80% health is not organically
+    ///         reachable from this harness precisely because the solver defends the floor:
+    ///         the worst measured collapse leaves the pot at ~97.7% (that is H-07's
+    ///         residual). So requiredEndPot is raised directly with stdstore.
+    ///
+    ///         Safe because executeBreathOverride's _captureYield restores prizePot but
+    ///         never recomputes requiredEndPot, so the injected value survives to the gate.
+    ///         The alternative was leaving the gate untested, which is worse.
+    function test_Override_IncreaseIsBlockedWhenPotHealthIsBelow80Percent() public {
+        _bootstrapAndStart();
+        _runStandardDraw();
+
+        uint256 higher = bulls.breathMultiplier() + 100;
+        assertLt(higher, bulls.breathRailMax(), "precondition: the increase is inside the rails");
+        bulls.proposeBreathOverride(higher, bytes32("raise"));
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+
+        // Raise the floor so the live pot sits well under 80% of it.
+        uint256 unhealthyFloor = bulls.prizePot() * 10000 / 5000; // pot is now 50% of floor
+        stdstore.target(address(bulls)).sig("requiredEndPot()").checked_write(unhealthyFloor);
+        assertLt(
+            bulls.prizePot() * 10000 / bulls.requiredEndPot(),
+            8000,
+            "precondition: pot health is genuinely below the 80% gate"
+        );
+
+        vm.expectRevert(IBullsEthCRE.PotBelowTrajectory.selector);
+        bulls.executeBreathOverride();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  Rails: the side effects of executing new ones
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// @notice Executing rails does not just store bounds, it CLAMPS live breath into them.
+    ///         Otherwise the rate would sit outside its own rails until the next draw.
+    function test_Rails_ExecuteClampsLiveBreathIntoTheNewBand() public {
+        _bootstrapAndStart();
+        _runStandardDraw();
+
+        uint256 live = bulls.breathMultiplier();
+        // Choose a floor comfortably above the live rate so the clamp must fire upward.
+        uint256 newMin = live + 100;
+        bulls.proposeBreathRails(newMin, newMin + 500, bytes32("raise floor"));
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+        bulls.executeBreathRails();
+
+        assertEq(bulls.breathMultiplier(), newMin, "live breath clamped up to the new floor");
+        assertGe(bulls.breathMultiplier(), bulls.breathRailMin(), "and now sits inside its rails");
+    }
+
+    /// @notice A pending override that would land outside the new rails is CANCELLED by the
+    ///         rails execute. Leaving it queued would let an out-of-band value apply later.
+    function test_Rails_ExecuteCancelsAPendingOverrideOutsideTheNewBand() public {
+        _bootstrapAndStart();
+        _runStandardDraw();
+
+        uint256 live = bulls.breathMultiplier();
+        uint256 lowTarget = live > 200 ? live - 100 : 110;
+        bulls.proposeBreathOverride(lowTarget, bytes32("queued"));
+        assertEq(bulls.pendingBreathOverride(), lowTarget, "override is queued");
+
+        // New rails whose floor sits ABOVE the queued value.
+        uint256 newMin = lowTarget + 200;
+        bulls.proposeBreathRails(newMin, newMin + 500, bytes32("raise floor"));
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+        bulls.executeBreathRails();
+
+        assertEq(
+            bulls.pendingBreathOverride(),
+            0,
+            "the now-invalid pending override was cancelled by the rails execute"
+        );
+    }
+
+    /// @notice Override bounds are checked against the LIVE rails, not the deploy defaults.
+    ///         Every other bounds test in this file uses the defaults, so this is the one
+    ///         that proves the check reads current state rather than constants.
+    function test_Override_BoundsFollowTheLiveRailsNotTheDefaults() public {
+        _bootstrapAndStart();
+        _runStandardDraw();
+
+        uint256 live = bulls.breathMultiplier();
+        uint256 newMin = live > 400 ? live - 200 : 200;
+        uint256 newMax = newMin + 400;
+        bulls.proposeBreathRails(newMin, newMax, bytes32("tighten"));
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+        bulls.executeBreathRails();
+
+        // A value legal under the DEFAULT rails (100..1500) but outside the new band.
+        uint256 outside = newMax + 100;
+        assertLt(outside, 1500, "precondition: this would have been legal under the defaults");
+        vm.expectRevert(IBullsEthCRE.ExceedsLimit.selector);
+        bulls.proposeBreathOverride(outside, bytes32("outside new rails"));
     }
 
     // ══════════════════════════════════════════════════════════════════════
