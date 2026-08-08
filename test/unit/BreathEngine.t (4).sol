@@ -7,23 +7,25 @@ import {BullsEth} from "../../src/BullsEthCRE.sol";
 import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
 
 /// @title  The breathing engine
-/// @notice The primitive the whole contract exists to demonstrate, and until now the only
-///         coverage it had was three regression files pinning H-04, H-06 and H-07.
+/// @notice The primitive the whole contract exists to demonstrate.
 ///
 /// @dev    Two halves. The engine itself: a geometric solver that sets each draw's
 ///         distribution rate so the pot stays on a solvent trajectory to the season's end
 ///         obligations. And fifteen governance functions across four mechanisms, each a
 ///         propose/execute/cancel triple behind a timelock.
 ///
-///         Note the two different timelock durations, which is easy to get wrong:
-///           TIMELOCK_DELAY       7 days   breath override, breath rails
-///           PRIZE_RATE_TIMELOCK  48 hours prize rate reduction and increase
+///         TIMELOCK_DELAY 7 days (breath override, breath rails).
+///         PRIZE_RATE_TIMELOCK 48 hours (prize rate, exhale floor release).
 ///
-///         Bounds that matter:
-///           BREATH_START            700 bps   at deploy
-///           BREATH_MIN / rail floor 100 bps   ABSOLUTE_BREATH_FLOOR, ungovernable
-///           BREATH_MAX             1500 bps
-///           exhale floor release   8000-20000 bps, default 12000 (a 20% cushion)
+///         Bounds: BREATH_START 700 bps. Rail floor 100 (ABSOLUTE_BREATH_FLOOR,
+///         ungovernable). BREATH_MAX 1500 default, ABSOLUTE_BREATH_CEILING 2000 hard limit.
+///         exhale floor release 8000-20000 bps, default 12000 (a 20% cushion).
+///
+///         BATCH 7 STATUS: X-01 (both exhale-floor behaviour tests), X-02 and X-03 (both
+///         recalibration tests) were rewritten this pass to actually exercise the
+///         branch/mechanism their names claim, following an external review that proved by
+///         executed probe that the earlier versions missed their target. Each fix's @dev
+///         explains what the earlier version got wrong.
 contract BreathEngineTest is SmartEarnBase {
     using stdStorage for StdStorage;
 
@@ -44,9 +46,6 @@ contract BreathEngineTest is SmartEarnBase {
         assertEq(bulls.breathRailMax(), BREATH_MAX, "rail ceiling at deploy");
     }
 
-    /// @notice Draw 1 is calibrated down from BREATH_START to whatever the floors allow.
-    ///         It is the tightest draw of the season because no draws have been played, so
-    ///         the OG pro-rata component of the dormancy floor is at 100%.
     function test_Engine_Draw1IsCalibratedDownFromStart() public {
         _bootstrapAndStart();
         assertLt(
@@ -56,17 +55,10 @@ contract BreathEngineTest is SmartEarnBase {
         );
     }
 
-    /// @notice IC-03. This test was logged as owed when v1.17 retained the draw-1 breath
-    ///         clamp rather than deleting it as "largely vestigial".
-    ///
-    ///         Two floors apply at draw 1 and they are different numbers:
-    ///           requiredEndPot      the season-end endgame obligation
-    ///           _dormancyNowFloor   unreleased VC seed + FULL OG net principal
-    ///
-    ///         At draw 1 the dormancy floor is the LARGER of the two, because no draws have
-    ///         been played so the OG pro-rata is undecayed. The claim under test is that the
-    ///         dormancy gate takes precedence: the pot must land on the dormancy floor, not
-    ///         on the lower endgame floor.
+    /// @notice IC-03. At draw 1 the dormancy floor (unreleased VC seed + FULL OG net
+    ///         principal) exceeds requiredEndPot (the season-end target), because no draws
+    ///         have been played so the OG pro-rata is undecayed. The claim under test is
+    ///         that the dormancy gate takes precedence: the pot lands on the HIGHER floor.
     function test_Engine_DormGateTakesPrecedenceOverTheDraw1Clamp() public {
         _bootstrapCommitted(MIN_PLAYERS_TO_START);
         for (uint256 i = 0; i < 50; i++) {
@@ -80,26 +72,19 @@ contract BreathEngineTest is SmartEarnBase {
         bulls.startGame();
 
         uint256 ogNet = 50 * OG_UPFRONT_COST * (10000 - bulls.UF_OG_TREASURY_BPS()) / 10000;
-        uint256 dormFloor = VC_SEED + ogNet; // no seed released yet, no draws played
+        uint256 dormFloor = VC_SEED + ogNet;
         uint256 endgameFloor = bulls.requiredEndPot();
-
         assertGt(dormFloor, endgameFloor, "at draw 1 the dormancy floor is the binding one");
 
         _runStandardDraw();
 
-        // The pot must respect the HIGHER floor, not the one the draw-1 clamp measures
-        // against. Two units of dust tolerance: the seed return is floor(weeklyPool/10), so
-        // under slightly different numbers the carried pot can land a micro-unit below the
-        // floor purely from integer flooring, which is not a gate failure.
+        // 2 units of dust tolerance: seed return is floor(weeklyPool/10), so the carried
+        // pot can land a micro-unit below the floor purely from integer flooring.
         assertGe(
             bulls.prizePot() + 2,
             dormFloor,
             "IC-03: DORM-GATE takes precedence, pot held at the dormancy floor"
         );
-        // NOTE: this lands on the floor almost exactly because every draw-1 buy is a
-        // commitment credit and adds no new cash. A future fixture with cash buys on draw 1
-        // will loosen the binding assertion below, and that is expected rather than a fault.
-        // And it should be close to it, not miles above, or the gate is not the binding constraint.
         assertLt(
             bulls.prizePot(),
             dormFloor + 1_000_000,
@@ -107,18 +92,10 @@ contract BreathEngineTest is SmartEarnBase {
         );
     }
 
-    /// @notice Two separate claims, because the ceiling alone is a weak bound: measured
-    ///         breath in a healthy game runs 170-550 bps against a 1500 ceiling, so
-    ///         `b <= railMax` would pass on almost any value.
-    ///
-    ///         So: the ceiling is never breached, AND in a healthy game breath never
-    ///         collapses to zero. A collapse to zero is legitimate under H-06 when the pot
-    ///         cannot hold its floor, but this fixture is solvent throughout, so a zero
-    ///         here would mean the solver had stopped distributing without cause.
-    ///
-    ///         Deliberately NO lower-rail assertion. Since H-06 the solver may correctly
-    ///         return below breathRailMin when holding the rail would breach requiredEndPot.
-    ///         Asserting b >= railMin would re-introduce the exact bug H-06 fixed.
+    /// @notice The ceiling is never breached, and in a healthy game breath never collapses
+    ///         to zero without cause. Deliberately NO lower-rail assertion: since H-06 the
+    ///         solver may correctly return below breathRailMin, and asserting b >= railMin
+    ///         would re-introduce the exact bug H-06 fixed.
     function test_Engine_BreathRespectsTheCeilingAndDoesNotCollapse() public {
         _bootstrapAndStart();
         for (uint256 d = 0; d < 6; d++) {
@@ -126,12 +103,6 @@ contract BreathEngineTest is SmartEarnBase {
             uint256 b = bulls.breathMultiplier();
             assertLe(b, bulls.breathRailMax(), "ceiling never breached");
             assertGt(b, 0, "healthy game, so breath has no cause to collapse to zero");
-            // NOT asserted: prizePot >= requiredEndPot. That was the first version and it
-            // FAILED, correctly: the pot reached 102,816 against a requiredEndPot of
-            // 105,000. requiredEndPot is a SEASON-END target that the solver projects
-            // forward to, so the pot may legitimately sit below it mid-season while future
-            // revenue is still expected to close the gap. The per-draw guarantee is the
-            // DORMANCY floor, not this one.
             assertGe(
                 bulls.prizePot(),
                 VC_SEED - bulls.seedReleased(),
@@ -140,16 +111,11 @@ contract BreathEngineTest is SmartEarnBase {
         }
     }
 
-    /// @notice The engine must adapt. A rate that never moves is not a solver, it is a
-    ///         constant. Counts DISTINCT values across five draws rather than merely
-    ///         checking that something changed once, which the draw-1 calibration alone
-    ///         would have guaranteed.
     function test_Engine_BreathTakesMultipleDistinctValues() public {
         _bootstrapAndStart();
         uint256[6] memory seen;
         seen[0] = bulls.breathMultiplier();
         uint256 distinct = 1;
-
         for (uint256 d = 1; d <= 5; d++) {
             _runStandardDraw();
             seen[d] = bulls.breathMultiplier();
@@ -159,55 +125,25 @@ contract BreathEngineTest is SmartEarnBase {
             }
             if (isNew) distinct++;
         }
-
         assertGe(distinct, 3, "breath took at least three distinct values, so it is solving");
     }
 
-    /// @notice avgNetRevenuePerDraw is the estimate the solver projects forward on, and it
-    ///         is the mechanism behind H-07's four-draw lag. It must move once real revenue
-    ///         starts arriving.
-    /// @notice avgNetRevenuePerDraw is the estimate the solver projects forward on, and the
-    ///         mechanism behind H-07's four-draw lag. It must actually move once revenue
-    ///         starts arriving.
-    ///
-    ///         Two earlier versions of this test were wrong. The first read
-    ///         `!= before || before > 0`, which passes whenever the estimate was already
-    ///         non-zero regardless of whether it updated: a vacuity hole. The second asserted
-    ///         the EMA must MOVE, which also failed, and correctly so: this fixture has 500
-    ///         players buying one ticket every draw, so net revenue is IDENTICAL each draw
-    ///         and a converged EMA has nothing to move to. Constant input, constant output.
-    ///
-    ///         So the real test is convergence, not movement: the estimate should settle at
-    ///         the actual per-draw net revenue. 500 tickets at $10 less a 25% treasury slice
-    ///         is $3,750, so that is the value it must find.
+    /// @notice The estimate should CONVERGE, not merely move. 500 tickets at $10 less a 25%
+    ///         treasury slice is $3,750 net per draw.
     function test_Engine_RevenueEstimateConvergesOnActualRevenue() public {
         _bootstrapAndStart();
         for (uint256 d = 0; d < 4; d++) {
             _runStandardDraw();
         }
-
         uint256 expected = MIN_PLAYERS_TO_START * TICKET_PRICE * (10000 - TREASURY_BPS) / 10000;
         uint256 actual = bulls.avgNetRevenuePerDraw();
-
         assertGt(actual, 0, "the estimate is live rather than sitting at zero");
-        assertApproxEqRel(
-            actual,
-            expected,
-            0.15e18,
-            "the estimate converged on real per-draw net revenue, within 15%"
-        );
+        assertApproxEqRel(actual, expected, 0.15e18, "the estimate converged on real net revenue, within 15%");
     }
 
-    /// @notice checkSolvency is the PREGAME preview of the same floor startGame enforces.
-    ///         v1.04's B-M-01 claimed they agree by construction. This pins the direction
-    ///         that is reachable: preview says solvent, so startGame must not revert on its
-    ///         own floor check.
-    ///
-    ///         HONEST LIMIT: the other direction is NOT tested here. Proving agreement
-    ///         properly needs a fixture where the preview reports INSOLVENT and startGame
-    ///         then reverts PotBelowTrajectory. Every configuration reachable from this
-    ///         harness is solvent at start, so that case is untested rather than covered.
-    ///         Recorded so the claim is not read as stronger than it is.
+    /// @notice HONEST LIMIT: only the solvent direction is tested. Every configuration
+    ///         reachable from this harness is solvent at start, so the insolvent
+    ///         checkSolvency/startGame agreement is untested rather than covered.
     function test_Engine_CheckSolvencySolventDirectionAgreesWithStartGame() public {
         _bootstrapCommitted(MIN_PLAYERS_TO_START);
         (bool solvent, uint256 deficit) = bulls.checkSolvency();
@@ -222,6 +158,378 @@ contract BreathEngineTest is SmartEarnBase {
     }
 
     // ══════════════════════════════════════════════════════════════════════
+    //  One-shot calibrations: draw 7 and draw 28
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// @notice Draw 7 recalibrates targetReturnBps from the LIVE OG ratio. v1.61 removed the
+    ///         breathMultiplier write here specifically to avoid a draw-7 breath bump
+    ///         artefact; completeDrawStep at draw 8 applies the new target normally.
+    function test_Recalibration_Draw7UpdatesTargetReturnFromLiveRatio() public {
+        _bootstrapAndStart();
+        uint256 targetBefore = bulls.targetReturnBps();
+        for (uint256 d = 1; d <= 7; d++) {
+            _runStandardDraw();
+        }
+        assertEq(bulls.currentDraw(), 8, "seven draws completed, now entering draw 8");
+        assertEq(bulls.targetReturnBps(), targetBefore, "unchanged: the ratio did not move (no OGs at all)");
+    }
+
+    /// @notice X-02 REWRITE. The earlier version registered ten OGs, cancelled NONE, and
+    ///         asserted the target unchanged while calling itself the case where the ratio
+    ///         "has cancelled" -- that is just the no-op control the test above already
+    ///         covers. Its stated route was also impossible on v1.17:
+    ///         cancelOGRegistration is PREGAME-only
+    ///         (`if (gamePhase != GamePhase.PREGAME) revert WrongPhase()`).
+    ///
+    /// @dev    THE REAL ROUTE: weekly OG STATUS LOSS. upfrontOGCount + earnedOGCount is the
+    ///         ratio's numerator; ogCapDenominator is fixed at startGame. A weekly OG who
+    ///         skips a buy loses status during that draw's matching, decrementing the
+    ///         numerator without moving the denominator, so the live ratio genuinely falls.
+    ///
+    ///         110 upfront OGs against 500 committed puts the ratio at 22%, comfortably
+    ///         above the curve's 20% knee, so a fall in ratio is a fall in target (below the
+    ///         knee the curve is flat and a small move would not register).
+    function test_Recalibration_Draw7ReactsWhenAWeeklyOgHasLostStatus() public {
+        // ORDERING IS LOAD-BEARING. _weeklyOGCapReached() is evaluated ONLY inside
+        // registerAsWeeklyOG, and TOTAL_OG_CAP_BPS (18%) is measured against
+        // upfrontOGCount + weeklyOGCount. Registering the upfront cohort first consumes
+        // the whole cap and every weekly registration then reverts OGCapReached. Weekly
+        // first, upfront after, is the order that works: the cap is never re-checked
+        // afterwards, so the weekly OGs are legitimately grandfathered above the knee.
+        // 500 casuals + 10 weekly + 140 upfront = committedPlayerCount 650.
+        // maxOGs 150, ratio 150*10000/650 = 2307 bps, above the 2000 knee, so
+        // targetReturnBps at start = 5000 - (2307-2000)*4000/8000 = 4847.
+        _bootstrapCommitted(MIN_PLAYERS_TO_START);
+        address[] memory wogs = new address[](10);
+        for (uint256 i = 0; i < 10; i++) {
+            wogs[i] = _newFundedPlayer(65200 + i);
+            vm.prank(wogs[i]); bulls.register();
+            vm.prank(wogs[i]); bulls.registerAsWeeklyOG(BASE_PREDICTION + 7000 + i, BASE_PREDICTION + 7500 + i);
+        }
+        for (uint256 i = 0; i < 140; i++) {
+            address og = _newFundedPlayer(65000 + i);
+            vm.prank(og); bulls.register();
+            vm.prank(og); bulls.registerAsOG(BASE_PREDICTION + 3000 + i, BASE_PREDICTION + 5000 + i);
+        }
+
+        bulls.proposeStartGame();
+        vm.warp(block.timestamp + START_GAME_NOTICE_PERIOD + 1);
+        ethFeed.pushRound(ETH_PRICE);
+        bulls.startGame();
+
+        uint256 targetBefore = bulls.targetReturnBps();
+
+        _runStandardDraw(); // draw 1: pregame weekly OG already credited
+        assertEq(bulls.currentDraw(), 2, "draw 1 finalised");
+
+        // Draw 2: the weekly OG deliberately does NOT buy. Casuals still do, so the draw
+        // remains resolvable and matching runs, which is what flips statusLost.
+        for (uint256 i = 0; i < players.length; i++) {
+            vm.prank(players[i]); bulls.buyTickets(1);
+            vm.prank(players[i]); bulls.submitPrediction(BASE_PREDICTION + i);
+        }
+        _warpToCooldownEnd();
+        _resolvePinned();
+        // 500 casuals + 150 OGs x2 = 800 snapshot entries. Counts 10/40/100 read as
+        // 125/500/1250 bps: T1 inside [50,400], T2 inside [400,1200], T3 inside
+        // [1000,5000]. OG predictions sit at BASE+3000 and up, far outside t3CutoffDiff,
+        // so they never win and reconciliation is unaffected.
+        bulls.submitCutoffDiffs(9e6, 39e6, 99e6, 10, 40, 100);
+        for (uint256 i = 0; i < 20; i++) {
+            uint256 ph = uint256(bulls.drawPhase());
+            if (ph == uint256(IBullsEthCRE.DrawPhase.IDLE)) break;
+            if (ph == uint256(IBullsEthCRE.DrawPhase.CUTOFF_SUBMISSION)) break;
+            bulls.completeDrawStep();
+        }
+        assertEq(bulls.currentDraw(), 3, "draw 2 finalised, status loss should have fired in matching");
+
+        for (uint256 d = 3; d <= 6; d++) {
+            _runStandardDraw();
+        }
+        assertEq(bulls.currentDraw(), 7, "entering draw 7");
+        assertEq(bulls.targetReturnBps(), targetBefore, "target still holds the ORIGINAL ratio through draw 6");
+
+        _runStandardDraw(); // draw 7 recalibrates
+        assertEq(bulls.currentDraw(), 8, "draw 7 completed");
+
+        // DIRECTION is the load-bearing claim, not the exact bps. Losing OGs above the 20%
+        // knee lowers the ratio, and the curve pays MORE per OG at a lower ratio, so the
+        // target must RISE. Hand-derived: ratio 2307 -> 2153, target 4847 -> 4924. Asserted
+        // as a rise rather than a literal so a rounding difference does not read as a
+        // regression, while a move in the wrong direction still fails loudly.
+        assertGt(
+            bulls.targetReturnBps(),
+            targetBefore,
+            "ratio fell (10 weekly OGs lost status), so draw 7 recalibrated the target UP"
+        );
+    }
+
+    /// @notice X-03 REWRITE. The earlier version asserted requiredEndPot >= floorBefore - 1
+    ///         after draw 28, which CANNOT FAIL: requiredEndPot is recomputed every draw by
+    ///         _snapshotOGObligation regardless of draw 28's own logic. This rewrite times a
+    ///         status loss to fire AFTER draw 7, so the target is stale through 8-27 and
+    ///         jumps specifically at 28, proving draw 28's OWN recalibration ran.
+    function test_Recalibration_Draw28UpdatesTheFinalFloor() public {
+        // Weekly-first ordering, same reason as the draw-7 test, plus TWO cohorts of five.
+        // Cohort A is lost at draw 2 (its effect on draw 7 is incidental here). Cohort B
+        // keeps buying through draw 8 and is lost at draw 9, so the ONLY ratio movement
+        // left for draw 28 to react to lands strictly after draw 7. Without that, the
+        // draw-28 assertion cannot distinguish _finalReturnCalibration from the routine
+        // per-draw snapshot, which recomputes requiredEndPot every draw anyway.
+        //
+        // 500 casuals + 10 weekly + 140 upfront = committedPlayerCount 650.
+        _bootstrapCommitted(MIN_PLAYERS_TO_START);
+        address[] memory wogsEarly = new address[](5);
+        for (uint256 i = 0; i < 5; i++) {
+            wogsEarly[i] = _newFundedPlayer(65500 + i);
+            vm.prank(wogsEarly[i]); bulls.register();
+            vm.prank(wogsEarly[i]); bulls.registerAsWeeklyOG(BASE_PREDICTION + 7000 + i, BASE_PREDICTION + 7500 + i);
+        }
+        address[] memory wogsLate = new address[](5);
+        for (uint256 i = 0; i < 5; i++) {
+            wogsLate[i] = _newFundedPlayer(65600 + i);
+            vm.prank(wogsLate[i]); bulls.register();
+            vm.prank(wogsLate[i]); bulls.registerAsWeeklyOG(BASE_PREDICTION + 7100 + i, BASE_PREDICTION + 7600 + i);
+        }
+        for (uint256 i = 0; i < 140; i++) {
+            address og = _newFundedPlayer(65300 + i);
+            vm.prank(og); bulls.register();
+            vm.prank(og); bulls.registerAsOG(BASE_PREDICTION + 3000 + i, BASE_PREDICTION + 5000 + i);
+        }
+
+        bulls.proposeStartGame();
+        vm.warp(block.timestamp + START_GAME_NOTICE_PERIOD + 1);
+        ethFeed.pushRound(ETH_PRICE);
+        bulls.startGame();
+
+        // Draw 1: everyone is already credited by registration (lastBoughtDraw = 1), so the
+        // weekly cohorts must NOT buy here or they revert AlreadyBoughtThisWeek.
+        _runStandardDraw();
+        assertEq(bulls.currentDraw(), 2, "draw 1 finalised");
+
+        // Draws 2-8: casuals buy, cohort B buys (2 tickets, the weekly-OG minimum), cohort A
+        // does not. Cohort A is therefore lost during draw 2's matching.
+        for (uint256 d = 2; d <= 8; d++) {
+            _driveDrawWithWeeklies(wogsLate);
+        }
+        assertEq(bulls.currentDraw(), 9, "seven more draws done, past draw 7's recalibration");
+        uint256 targetAfterDraw7 = bulls.targetReturnBps();
+
+        // Draw 9: cohort B stops buying too, so it is lost here. This is the move draw 28
+        // has left to see.
+        address[] memory none = new address[](0);
+        _driveDrawWithWeeklies(none);
+        assertEq(bulls.currentDraw(), 10, "draw 9 finalised, cohort B lost status in matching");
+
+        // Draws 10-27: nothing further moves the ratio, so the target must sit stale.
+        for (uint256 d = 10; d <= 27; d++) {
+            _driveDrawWithWeeklies(none);
+        }
+        assertEq(bulls.currentDraw(), 28, "27 draws completed, entering draw 28");
+        assertEq(
+            bulls.targetReturnBps(),
+            targetAfterDraw7,
+            "target is STALE through draw 27: the ratio moved at draw 9 but nothing recalibrated it"
+        );
+        uint256 floorBeforeDraw28 = bulls.requiredEndPot();
+
+        _driveDrawWithWeeklies(none); // draw 28: _finalReturnCalibration must fire here
+
+        assertEq(bulls.currentDraw(), 29, "draw 28 completed");
+        assertTrue(
+            bulls.targetReturnBps() != targetAfterDraw7,
+            "target JUMPED at exactly draw 28, proving _finalReturnCalibration ran there"
+        );
+        assertTrue(
+            bulls.requiredEndPot() != floorBeforeDraw28,
+            "requiredEndPot moved with the target, through _requiredEndPotFloor"
+        );
+    }
+
+    /// @dev Drives one full draw where the casuals buy one ticket each and the supplied
+    ///      weekly OGs buy their two-ticket minimum. Any weekly OG NOT in the list simply
+    ///      does not buy, which is what makes it lose status during this draw's matching.
+    ///
+    ///      Needed because _runStandardDraw only buys for the bootstrapped `players` array;
+    ///      separately-registered weekly OGs are invisible to it. An earlier version of the
+    ///      draw-28 test relied on _runStandardDraw to keep its weekly cohort alive through
+    ///      draw 8, so the whole cohort was actually lost at draw 2 and the test measured
+    ///      the opposite of what it claimed.
+    function _driveDrawWithWeeklies(address[] memory weeklies) internal {
+        for (uint256 i = 0; i < players.length; i++) {
+            vm.prank(players[i]); bulls.buyTickets(1);
+            vm.prank(players[i]); bulls.submitPrediction(BASE_PREDICTION + i);
+        }
+        // Constant read hoisted OUT of the prank line. Two bugs live here, both real:
+        // (1) MIN_TICKETS_WEEKLY_OG is a CONTRACT constant, not one this test declares, so
+        //     using it bare does not compile.
+        // (2) The obvious fix -- bulls.MIN_TICKETS_WEEKLY_OG() inline in the argument --
+        //     compiles and then fails at runtime with NotRegistered, because vm.prank
+        //     applies to the NEXT external call and a getter in the argument position IS
+        //     that call. The prank is consumed by the getter and buyTickets then executes
+        //     as the (unregistered) test contract. Same footgun as putting a getter inside
+        //     vm.expectRevert's arguments; hoist the read and the problem disappears.
+        uint256 wogTickets = bulls.MIN_TICKETS_WEEKLY_OG();
+        for (uint256 i = 0; i < weeklies.length; i++) {
+            vm.prank(weeklies[i]); bulls.buyTickets(wogTickets);
+        }
+        _warpToCooldownEnd();
+        _resolvePinned();
+        // 500 casuals + up to 150 OGs x2 = at most 800 snapshot entries; the OG count only
+        // falls as status is lost. Counts 10/40/100 read as 125/500/1250 bps at 800 and
+        // rise as the snapshot shrinks, staying inside T1 [50,400], T2 [400,1200],
+        // T3 [1000,5000] throughout. OG predictions sit at BASE+3000 and up, outside t3.
+        bulls.submitCutoffDiffs(9e6, 39e6, 99e6, 10, 40, 100);
+        for (uint256 i = 0; i < 20; i++) {
+            uint256 ph = uint256(bulls.drawPhase());
+            if (ph == uint256(IBullsEthCRE.DrawPhase.IDLE)) break;
+            if (ph == uint256(IBullsEthCRE.DrawPhase.CUTOFF_SUBMISSION)) break;
+            bulls.completeDrawStep();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  Exhale floor: the behaviour, not just the governance around it
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// @notice X-01 REWRITE. Two earlier versions missed their branch, PROVEN by executed
+    ///         probes: HOLD injected the floor DOWN (more headroom, solver went UP, hold
+    ///         block never entered -- a probe proved breath rose). RELEASE injected 2x floor
+    ///         (H-06 insolvency territory, solver returned 0, and 0 < railMin means the
+    ///         RAIL-RELEASE path bypasses the exhale block entirely -- a probe proved breath
+    ///         landed exactly 0, and that test asserted nothing about breath anyway).
+    ///
+    ///         Both branches need the solver to want LOWER than the CURRENT rate, which
+    ///         needs breath ELEVATED first. Recipe: OG-only fixture, 20 zero-revenue draws
+    ///         past INHALE_DRAWS, override breath UP, ride the 3-draw cooldown, THEN inject
+    ///         requiredEndPot per arm so health sits either side of 12000 bps.
+    function _elevateBreathThenClearTheLock() internal returns (uint256 elevated) {
+        _bootstrapCommitted(MIN_PLAYERS_TO_START);
+        for (uint256 i = 0; i < 50; i++) {
+            address og = _newFundedPlayer(66000 + i);
+            vm.prank(og); bulls.register();
+            vm.prank(og); bulls.registerAsOG(BASE_PREDICTION + 3000 + i, BASE_PREDICTION + 5000 + i);
+        }
+        bulls.proposeStartGame();
+        vm.warp(block.timestamp + START_GAME_NOTICE_PERIOD + 1);
+        ethFeed.pushRound(ETH_PRICE);
+        bulls.startGame();
+
+        for (uint256 d = 1; d <= 20; d++) {
+            _warpToCooldownEnd();
+            _resolvePinned();
+            bulls.submitCutoffDiffs(3002e6, 3008e6, 3020e6, 3, 9, 21);
+            for (uint256 i = 0; i < 20; i++) {
+                uint256 ph = uint256(bulls.drawPhase());
+                if (ph == uint256(IBullsEthCRE.DrawPhase.IDLE)) break;
+                if (ph == uint256(IBullsEthCRE.DrawPhase.CUTOFF_SUBMISSION)) break;
+                bulls.completeDrawStep();
+            }
+        }
+        assertEq(bulls.currentDraw(), 21, "twenty draws completed, past INHALE_DRAWS");
+
+        // ABSOLUTE, not relative. `breathMultiplier() + 100` was the earlier version and it
+        // is exactly what made the release arm assert "100 >= 100": after 20 zero-revenue
+        // draws the solver has already driven breath to 0, so +100 elevates to 100, which IS
+        // breathRailMin. The release arm then compared breath against railMin and passed
+        // while breath was actually 0 -- the H-06 rail-release path, not the exhale release
+        // the test claims to be checking. A fixed value clear of the rail removes that.
+        elevated = 1200;
+        assertLt(elevated, bulls.breathRailMax(), "precondition: the raise is inside the rails");
+        assertGt(elevated, bulls.breathRailMin(), "precondition: and clear of the rail floor");
+        bulls.proposeBreathOverride(elevated, bytes32("elevate for exhale test"));
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+        bulls.executeBreathOverride();
+        assertEq(bulls.breathMultiplier(), elevated, "breath is now elevated above the solver's own answer");
+
+        // FOUR draws, not one. executeBreathOverride sets
+        // breathOverrideLockUntilDraw = currentDraw + BREATH_COOLDOWN_DRAWS (3), and
+        // _checkAutoAdjust returns early while `currentDraw <= breathOverrideLockUntilDraw`.
+        // The override lands at draw 21, so the lock covers draws 22-24 and the solver only
+        // runs freely again from draw 25. One draw left it locked, so the arm's injected
+        // draw never reached the exhale gate at all.
+        for (uint256 d = 0; d < 4; d++) {
+            _warpToCooldownEnd();
+            _resolvePinned();
+            bulls.submitCutoffDiffs(3002e6, 3008e6, 3020e6, 3, 9, 21);
+            for (uint256 i = 0; i < 20; i++) {
+                uint256 ph = uint256(bulls.drawPhase());
+                if (ph == uint256(IBullsEthCRE.DrawPhase.IDLE)) break;
+                if (ph == uint256(IBullsEthCRE.DrawPhase.CUTOFF_SUBMISSION)) break;
+                bulls.completeDrawStep();
+            }
+        }
+        assertEq(bulls.currentDraw(), 25, "four draws elapsed, override lock cleared");
+        assertGt(
+            bulls.currentDraw(),
+            bulls.breathOverrideLockUntilDraw(),
+            "precondition: the solver is genuinely free to run again"
+        );
+        assertEq(bulls.breathMultiplier(), elevated, "and breath is still the elevated value");
+    }
+
+    /// @notice HOLD ARM. Pot healthy (>= 120% of floor), solver wants lower than elevated
+    ///         breath: the comfort floor must hold it at exactly the elevated value.
+    function test_ExhaleFloor_HoldsTheElevatedBreathWhenThePotIsHealthy() public {
+        uint256 elevated = _elevateBreathThenClearTheLock();
+
+        uint256 healthyFloor = bulls.prizePot() * 10000 / 13000; // pot now 130% of floor
+        stdstore.target(address(bulls)).sig("requiredEndPot()").checked_write(healthyFloor);
+        assertGe(
+            bulls.prizePot() * 10000 / bulls.requiredEndPot(),
+            bulls.exhaleFloorReleaseBps(),
+            "precondition: genuinely healthy by the gate's own threshold"
+        );
+
+        _warpToCooldownEnd();
+        _resolvePinned();
+        bulls.submitCutoffDiffs(3002e6, 3008e6, 3020e6, 3, 9, 21);
+        for (uint256 i = 0; i < 20; i++) {
+            uint256 ph = uint256(bulls.drawPhase());
+            if (ph == uint256(IBullsEthCRE.DrawPhase.IDLE)) break;
+            if (ph == uint256(IBullsEthCRE.DrawPhase.CUTOFF_SUBMISSION)) break;
+            bulls.completeDrawStep();
+        }
+
+        assertEq(
+            bulls.breathMultiplier(),
+            elevated,
+            "HOLD: equality, not >=. The floor held against a solver that provably wanted lower."
+        );
+    }
+
+    /// @notice RELEASE ARM. Pot unhealthy (<120%, nowhere near H-06 insolvency), solver
+    ///         wants lower than elevated breath: the comfort floor must stand down.
+    function test_ExhaleFloor_ReleasesTheElevatedBreathWhenThePotIsUnhealthy() public {
+        uint256 elevated = _elevateBreathThenClearTheLock();
+
+        uint256 unhealthyFloor = bulls.prizePot() * 10000 / 11000; // pot now 110% of floor
+        stdstore.target(address(bulls)).sig("requiredEndPot()").checked_write(unhealthyFloor);
+        assertLt(
+            bulls.prizePot() * 10000 / bulls.requiredEndPot(),
+            bulls.exhaleFloorReleaseBps(),
+            "precondition: genuinely unhealthy by the gate's own threshold"
+        );
+
+        _warpToCooldownEnd();
+        _resolvePinned();
+        bulls.submitCutoffDiffs(3002e6, 3008e6, 3020e6, 3, 9, 21);
+        for (uint256 i = 0; i < 20; i++) {
+            uint256 ph = uint256(bulls.drawPhase());
+            if (ph == uint256(IBullsEthCRE.DrawPhase.IDLE)) break;
+            if (ph == uint256(IBullsEthCRE.DrawPhase.CUTOFF_SUBMISSION)) break;
+            bulls.completeDrawStep();
+        }
+
+        assertLt(bulls.breathMultiplier(), elevated, "RELEASE: breath fell from the elevated value");
+        assertGe(
+            bulls.breathMultiplier(),
+            bulls.breathRailMin(),
+            "and stayed >= railMin: this is the EXHALE release, not an H-06 rail-release bypass"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
     //  Governance: breath override (7-day timelock)
     // ══════════════════════════════════════════════════════════════════════
 
@@ -229,13 +537,8 @@ contract BreathEngineTest is SmartEarnBase {
         _bootstrapAndStart();
         uint256 target = bulls.breathMultiplier() > 300 ? bulls.breathMultiplier() - 50 : 400;
         bulls.proposeBreathOverride(target, bytes32("test"));
-
         assertEq(bulls.pendingBreathOverride(), target, "pending set");
-        assertEq(
-            bulls.breathOverrideEffectiveTime(),
-            block.timestamp + TIMELOCK_DELAY,
-            "7 days, not 48 hours"
-        );
+        assertEq(bulls.breathOverrideEffectiveTime(), block.timestamp + TIMELOCK_DELAY, "7 days, not 48 hours");
     }
 
     function test_Override_RevertsForNonOwner() public {
@@ -250,15 +553,12 @@ contract BreathEngineTest is SmartEarnBase {
         _bootstrapAndStart();
         vm.expectRevert(IBullsEthCRE.ExceedsLimit.selector);
         bulls.proposeBreathOverride(BREATH_MAX + 1, bytes32("too high"));
-
         vm.expectRevert(IBullsEthCRE.ExceedsLimit.selector);
         bulls.proposeBreathOverride(ABSOLUTE_BREATH_FLOOR - 1, bytes32("too low"));
     }
 
     function test_Override_RevertsWhenUnchanged() public {
         _bootstrapAndStart();
-        // Read the value FIRST. vm.expectRevert applies to the next call, and a getter in
-        // the argument list is a call, so it would attach to breathMultiplier() instead.
         uint256 current = bulls.breathMultiplier();
         vm.expectRevert(IBullsEthCRE.BreathUnchanged.selector);
         bulls.proposeBreathOverride(current, bytes32("same"));
@@ -299,7 +599,6 @@ contract BreathEngineTest is SmartEarnBase {
         bulls.proposeBreathOverride(target, bytes32("x"));
         vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
         bulls.executeBreathOverride();
-
         assertEq(bulls.breathMultiplier(), target, "new rate applied");
         assertEq(bulls.pendingBreathOverride(), 0, "pending cleared");
     }
@@ -309,9 +608,7 @@ contract BreathEngineTest is SmartEarnBase {
         uint256 target = bulls.breathMultiplier() > 300 ? bulls.breathMultiplier() - 50 : 400;
         bulls.proposeBreathOverride(target, bytes32("x"));
         bulls.cancelBreathOverride();
-
         assertEq(bulls.pendingBreathOverride(), 0, "cleared");
-        // and it becomes proposable again
         bulls.proposeBreathOverride(target, bytes32("again"));
         assertEq(bulls.pendingBreathOverride(), target, "re-proposable after cancel");
     }
@@ -320,18 +617,13 @@ contract BreathEngineTest is SmartEarnBase {
     //  Override: the cooldown lock and the pot-health gate
     // ══════════════════════════════════════════════════════════════════════
 
-    /// @notice An executed override locks the solver out for BREATH_COOLDOWN_DRAWS. Without
-    ///         that, the next draw's _checkAutoAdjust would simply overwrite the operator's
-    ///         decision and the override would be pointless.
     function test_Override_LocksTheSolverOutForThreeDraws() public {
         _bootstrapAndStart();
-        _runStandardDraw(); // let the solver settle
-
+        _runStandardDraw();
         uint256 target = bulls.breathMultiplier() > 300 ? bulls.breathMultiplier() - 50 : 400;
         bulls.proposeBreathOverride(target, bytes32("hold"));
         vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
         bulls.executeBreathOverride();
-
         assertEq(bulls.breathMultiplier(), target, "the override applied");
         assertEq(
             bulls.breathOverrideLockUntilDraw(),
@@ -345,40 +637,23 @@ contract BreathEngineTest is SmartEarnBase {
         );
     }
 
-    /// @dev FIXTURE CONSTRAINT worth recording rather than working around silently. The
-    ///      override timelock is 7 DAYS and a draw's buy window closes 48 HOURS after the
-    ///      previous slot, so warping out the timelock always lands past the next window
-    ///      and _runStandardDraw then reverts PicksLocked. That is correct contract
-    ///      behaviour, not a bug: an operator using a 7-day governance action will
-    ///      necessarily skip at least one draw's buying.
-    ///
-    ///      So the lock's EFFECT across a live draw cannot be observed from this harness.
-    ///      It needs a fixture that lets draws elapse during the timelock rather than
-    ///      warping straight through it. Recorded as owed rather than asserted weakly.
-
-    /// @notice The EMA keeps tracking through the lock. If it froze too, the solver would
-    ///         come back after three draws with a stale view of revenue.
+    /// @notice Pins the override applying. The lock's live effect on a draw is closed below
+    ///         by the OG-only fixture test, since a 7-day timelock warp on the casuals
+    ///         fixture blows past the next 48h buy window and no draw can run under it.
     function test_Override_EmaKeepsUpdatingDuringTheLock() public {
         _bootstrapAndStart();
         _runStandardDraw();
-
         uint256 target = bulls.breathMultiplier() > 300 ? bulls.breathMultiplier() - 50 : 400;
         bulls.proposeBreathOverride(target, bytes32("hold"));
         vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
         bulls.executeBreathOverride();
-
         assertEq(bulls.breathMultiplier(), target, "the override is what breath now holds");
     }
 
-    /// @notice THE LOCK'S EFFECT, closed using the OG-only fixture. The problem with the
-    ///         casuals fixture is that a 7-day timelock warp blows past the next 48h buy
-    ///         window, so no draw can run under the lock. Upfront OGs need no buys: their
-    ///         entries exist from registration, so draws stay resolvable however long the
-    ///         warp. That makes the lock observable.
-    ///
-    ///         Two claims, both previously unpinned: the solver does NOT move breath while
-    ///         locked, and the EMA DOES keep blending. The lock freezes the decision, not
-    ///         the accounting, so the solver returns with a current view of revenue.
+    /// @notice THE LOCK'S EFFECT, closed using the OG-only fixture. Upfront OGs need no
+    ///         buys, so draws stay resolvable however long the warp, which makes the lock
+    ///         observable. Two claims, both previously unpinned: the solver does NOT move
+    ///         breath while locked, and the EMA DOES keep blending.
     function test_Override_SolverIsFrozenButTheEmaKeepsBlending() public {
         _bootstrapCommitted(MIN_PLAYERS_TO_START);
         for (uint256 i = 0; i < 50; i++) {
@@ -399,15 +674,9 @@ contract BreathEngineTest is SmartEarnBase {
 
         uint256 emaBefore = bulls.avgNetRevenuePerDraw();
 
-        // One OG-only draw, entirely inside the lock. 100 entries, so 3/9/21.
         _warpToCooldownEnd();
         _resolvePinned();
-        // Diffs must reach the OG ladder: predictions are BASE+3000+i and BASE+5000+i,
-        // so every diff is >= 3000e6. The tight 2e6/8e6/20e6 set catches nobody and the
-        // draw bounces on a count mismatch. Widened to sit on the ladder itself.
         bulls.submitCutoffDiffs(3002e6, 3008e6, 3020e6, 3, 9, 21);
-        // Stop on IDLE or on a bounce back to CUTOFF_SUBMISSION: completeDrawStep reverts
-        // DrawNotProgressing in that phase, so a naive loop cannot observe a bounce.
         for (uint256 i = 0; i < 20; i++) {
             uint256 ph = uint256(bulls.drawPhase());
             if (ph == uint256(IBullsEthCRE.DrawPhase.IDLE)) break;
@@ -429,13 +698,11 @@ contract BreathEngineTest is SmartEarnBase {
     }
 
     /// @notice CONTROL CASE. A decrease is never blocked by pot health. Named for what it
-    ///         actually pins: an earlier version of this was called
-    ///         "IncreaseIsGatedOnPotHealth" and tested only this half, so a contract with
-    ///         the gate deleted entirely would have passed it. The treatment case is below.
+    ///         actually pins: an earlier version tested only this half under the name
+    ///         "IncreaseIsGatedOnPotHealth". The treatment case is below.
     function test_Override_DecreaseIsNeverGatedOnPotHealth() public {
         _bootstrapAndStart();
         _runStandardDraw();
-
         uint256 lower = bulls.breathMultiplier() > 300 ? bulls.breathMultiplier() - 50 : 150;
         bulls.proposeBreathOverride(lower, bytes32("cut"));
         vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
@@ -443,29 +710,21 @@ contract BreathEngineTest is SmartEarnBase {
         assertEq(bulls.breathMultiplier(), lower, "a cut is never blocked by pot health");
     }
 
-    /// @notice TREATMENT CASE, and the one that actually fires the gate. An override that
-    ///         RAISES breath must revert PotBelowTrajectory when the pot is under 80% of
-    ///         requiredEndPot. That asymmetry is the point: cutting spend is always safe,
-    ///         raising it while behind trajectory is not.
+    /// @notice TREATMENT CASE. An override that RAISES breath must revert
+    ///         PotBelowTrajectory when the pot is under 80% of requiredEndPot.
     ///
-    /// @dev    STATE INJECTION, deliberate and explained. Sub-80% health is not organically
-    ///         reachable from this harness precisely because the solver defends the floor:
-    ///         the worst measured collapse leaves the pot at ~97.7% (that is H-07's
-    ///         residual). So requiredEndPot is raised directly with stdstore.
-    ///
-    ///         Safe because executeBreathOverride's _captureYield restores prizePot but
-    ///         never recomputes requiredEndPot, so the injected value survives to the gate.
-    ///         The alternative was leaving the gate untested, which is worse.
+    /// @dev    STATE INJECTION. Sub-80% health is not organically reachable from this
+    ///         harness (the worst measured collapse leaves the pot at ~97.7%, H-07's
+    ///         residual). Safe because executeBreathOverride's _captureYield restores
+    ///         prizePot but never recomputes requiredEndPot.
     function test_Override_IncreaseIsBlockedWhenPotHealthIsBelow80Percent() public {
         _bootstrapAndStart();
         _runStandardDraw();
-
         uint256 higher = bulls.breathMultiplier() + 100;
         assertLt(higher, bulls.breathRailMax(), "precondition: the increase is inside the rails");
         bulls.proposeBreathOverride(higher, bytes32("raise"));
         vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
 
-        // Raise the floor so the live pot sits well under 80% of it.
         uint256 unhealthyFloor = bulls.prizePot() * 10000 / 5000; // pot is now 50% of floor
         stdstore.target(address(bulls)).sig("requiredEndPot()").checked_write(unhealthyFloor);
         assertLt(
@@ -482,35 +741,26 @@ contract BreathEngineTest is SmartEarnBase {
     //  Rails: the side effects of executing new ones
     // ══════════════════════════════════════════════════════════════════════
 
-    /// @notice Executing rails does not just store bounds, it CLAMPS live breath into them.
-    ///         Otherwise the rate would sit outside its own rails until the next draw.
     function test_Rails_ExecuteClampsLiveBreathIntoTheNewBand() public {
         _bootstrapAndStart();
         _runStandardDraw();
-
         uint256 live = bulls.breathMultiplier();
-        // Choose a floor comfortably above the live rate so the clamp must fire upward.
         uint256 newMin = live + 100;
         bulls.proposeBreathRails(newMin, newMin + 500, bytes32("raise floor"));
         vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
         bulls.executeBreathRails();
-
         assertEq(bulls.breathMultiplier(), newMin, "live breath clamped up to the new floor");
         assertGe(bulls.breathMultiplier(), bulls.breathRailMin(), "and now sits inside its rails");
     }
 
-    /// @notice A pending override that would land outside the new rails is CANCELLED by the
-    ///         rails execute. Leaving it queued would let an out-of-band value apply later.
     function test_Rails_ExecuteCancelsAPendingOverrideOutsideTheNewBand() public {
         _bootstrapAndStart();
         _runStandardDraw();
-
         uint256 live = bulls.breathMultiplier();
         uint256 lowTarget = live > 200 ? live - 100 : 110;
         bulls.proposeBreathOverride(lowTarget, bytes32("queued"));
         assertEq(bulls.pendingBreathOverride(), lowTarget, "override is queued");
 
-        // New rails whose floor sits ABOVE the queued value.
         uint256 newMin = lowTarget + 200;
         bulls.proposeBreathRails(newMin, newMin + 500, bytes32("raise floor"));
         vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
@@ -523,13 +773,9 @@ contract BreathEngineTest is SmartEarnBase {
         );
     }
 
-    /// @notice Override bounds are checked against the LIVE rails, not the deploy defaults.
-    ///         Every other bounds test in this file uses the defaults, so this is the one
-    ///         that proves the check reads current state rather than constants.
     function test_Override_BoundsFollowTheLiveRailsNotTheDefaults() public {
         _bootstrapAndStart();
         _runStandardDraw();
-
         uint256 live = bulls.breathMultiplier();
         uint256 newMin = live > 400 ? live - 200 : 200;
         uint256 newMax = newMin + 400;
@@ -537,7 +783,6 @@ contract BreathEngineTest is SmartEarnBase {
         vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
         bulls.executeBreathRails();
 
-        // A value legal under the DEFAULT rails (100..1500) but outside the new band.
         uint256 outside = newMax + 100;
         assertLt(outside, 1500, "precondition: this would have been legal under the defaults");
         vm.expectRevert(IBullsEthCRE.ExceedsLimit.selector);
@@ -548,31 +793,22 @@ contract BreathEngineTest is SmartEarnBase {
     //  Governance: breath rails (7-day timelock)
     // ══════════════════════════════════════════════════════════════════════
 
-    /// @notice ABSOLUTE_BREATH_FLOOR is the reason H-06 existed: a hard bottom under the
-    ///         rail that governance could not lower. It is still ungovernable, which is
-    ///         correct, because H-06 was fixed in the solver rather than by moving the rail.
     function test_Rails_CannotBeSetBelowTheAbsoluteFloor() public {
         _bootstrapAndStart();
         vm.expectRevert(IBullsEthCRE.BelowMinimum.selector);
         bulls.proposeBreathRails(ABSOLUTE_BREATH_FLOOR - 1, BREATH_MAX, bytes32("too low"));
     }
 
-    /// @dev The rail ceiling is ABSOLUTE_BREATH_CEILING (2000), which is ABOVE the default
-    ///      breathRailMax (1500). So governance can raise the ceiling, up to a hard limit.
     function test_Rails_CannotBeSetAboveTheAbsoluteCeiling() public {
         _bootstrapAndStart();
         vm.expectRevert(IBullsEthCRE.ExceedsLimit.selector);
         bulls.proposeBreathRails(ABSOLUTE_BREATH_FLOOR, ABSOLUTE_BREATH_CEILING + 1, bytes32("too high"));
     }
 
-    /// @dev Equal or inverted rails are rejected, because equal rails would pin breath to a
-    ///      fixed point and bypass the solver for the rest of the season. The contract's own
-    ///      comment points at proposeBreathOverride for an intentional fixed-rate mode.
     function test_Rails_RejectsEqualOrInvertedRails() public {
         _bootstrapAndStart();
         vm.expectRevert(IBullsEthCRE.ExceedsLimit.selector);
         bulls.proposeBreathRails(500, 500, bytes32("equal"));
-
         vm.expectRevert(IBullsEthCRE.ExceedsLimit.selector);
         bulls.proposeBreathRails(800, 400, bytes32("inverted"));
     }
@@ -582,10 +818,8 @@ contract BreathEngineTest is SmartEarnBase {
         bulls.proposeBreathRails(200, 1200, bytes32("tighter"));
         assertEq(bulls.pendingBreathRailMin(), 200, "pending min");
         assertEq(bulls.pendingBreathRailMax(), 1200, "pending max");
-
         vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
         bulls.executeBreathRails();
-
         assertEq(bulls.breathRailMin(), 200, "min applied");
         assertEq(bulls.breathRailMax(), 1200, "max applied");
     }
@@ -618,22 +852,13 @@ contract BreathEngineTest is SmartEarnBase {
     //  Governance: prize rate (48-hour timelock, NOT 7 days)
     // ══════════════════════════════════════════════════════════════════════
 
-    /// @dev IMPORTANT: prizeRateMultiplier is NOT breathMultiplier. It is a separate scalar,
-    ///      defaulting to 10000 (100%), with a reduction floor of 5000 and an increase
-    ///      ceiling of 10000. So it can only ever scale prizes DOWN from full, and an
-    ///      increase is impossible until a reduction has been made. Conflating the two is
-    ///      easy: they are both "rates" and both governed by propose/execute triples.
     function test_PrizeRate_DefaultsToFull() public view {
         assertEq(bulls.prizeRateMultiplier(), 10000, "starts at 100%");
     }
 
-    /// @notice The prize rate mechanism runs on a 48-hour timelock, not the 7 days used by
-    ///         the breath override. Using the wrong constant would silently make a reduction
-    ///         wait five extra days.
     function test_PrizeRate_ReductionUsesTheShorterTimelock() public {
         _bootstrapAndStart();
         bulls.proposePrizeRateReduction(9000, bytes32("cut to 90%"));
-
         vm.warp(block.timestamp + PRIZE_RATE_TIMELOCK + 1);
         bulls.executePrizeRateReduction();
         assertEq(bulls.prizeRateMultiplier(), 9000, "applied after 48h, not 7 days");
@@ -651,42 +876,17 @@ contract BreathEngineTest is SmartEarnBase {
         bulls.proposePrizeRateReduction(4999, bytes32("too deep"));
     }
 
-    /// @dev An increase is only reachable after a reduction, since the default is already at
-    ///      the ceiling. Worth pinning: it means the mechanism is a one-way ratchet you can
-    ///      partially undo, not a free dial.
     function test_PrizeRate_IncreaseRejectsAboveTheCeiling() public {
         _bootstrapAndStart();
         bulls.proposePrizeRateReduction(9000, bytes32("cut first"));
         vm.warp(block.timestamp + PRIZE_RATE_TIMELOCK + 1);
         bulls.executePrizeRateReduction();
-
         vm.expectRevert(IBullsEthCRE.ExceedsLimit.selector);
         bulls.proposePrizeRateIncrease(10001, bytes32("above full"));
     }
 
-    /// @notice RESTORED. This was dropped after failing with TooEarly in company while
-    ///         passing alone. A separate investigation on a clean forge rig reproduced all
-    ///         three symptoms only by planting a duplicate test of the same name carrying a
-    ///         stale-warp-anchor bug, and proved the described body passes both ways on two
-    ///         forge versions. A grep of this repo finds NO duplicate, so that form is ruled
-    ///         out here and the remaining explanation is methodological. CONFIRMED by
-    ///         execution: this body now passes in the full suite.
-    ///
-    ///         The MOST LIKELY cause, by elimination rather than proof: the original
-    ///         diagnosis changed two things at once, adding diagnostic statements AND
-    ///         scoping the run with --match-test, then credited the difference to the
-    ///         scoping. Git history was not checked, so that remains inference.
-    ///
-    ///         The discipline that makes it immune to the stale-anchor bug: every warp is
-    ///         `block.timestamp + delta`, never a captured variable, so each warp moves
-    ///         relative to NOW rather than to a timestamp read before an earlier warp.
-    ///
-    ///         The mid-flight assertions are deliberate: they pin the exact arithmetic the
-    ///         original debugging session had to check by hand, so a future failure says
-    ///         WHERE it broke rather than just TooEarly.
     function test_PrizeRate_IncreaseCanRestorePartOfAReduction() public {
         _bootstrapAndStart();
-
         bulls.proposePrizeRateReduction(8000, bytes32("cut to 80%"));
         vm.warp(block.timestamp + PRIZE_RATE_TIMELOCK + 1);
         bulls.executePrizeRateReduction();
@@ -701,7 +901,6 @@ contract BreathEngineTest is SmartEarnBase {
         );
         vm.warp(block.timestamp + PRIZE_RATE_TIMELOCK + 1);
         bulls.executePrizeRateIncrease();
-
         assertEq(bulls.prizeRateMultiplier(), 9000, "partial restore applied");
     }
 
@@ -718,7 +917,6 @@ contract BreathEngineTest is SmartEarnBase {
         uint256 rateBefore = bulls.prizeRateMultiplier();
         bulls.proposePrizeRateReduction(9000, bytes32("x"));
         bulls.cancelPrizeRateReduction();
-
         vm.warp(block.timestamp + PRIZE_RATE_TIMELOCK + 1);
         vm.expectRevert(IBullsEthCRE.NoTimelockPending.selector);
         bulls.executePrizeRateReduction();
@@ -729,9 +927,6 @@ contract BreathEngineTest is SmartEarnBase {
     //  Governance: exhale floor release
     // ══════════════════════════════════════════════════════════════════════
 
-    /// @notice The exhale comfort floor only overrides the solver when the pot is at or
-    ///         above this multiple of requiredEndPot. Default 12000 bps is a 20% cushion,
-    ///         which is what stops the comfort floor from being a solvency hole.
     function test_ExhaleFloor_DefaultsToA20PercentCushion() public view {
         assertEq(bulls.exhaleFloorReleaseBps(), 12000, "120% of the floor by default");
     }
@@ -748,11 +943,6 @@ contract BreathEngineTest is SmartEarnBase {
         bulls.proposeExhaleFloorRelease(20001);
     }
 
-    /// @dev The exhale floor runs on PRIZE_RATE_TIMELOCK (48h), NOT TIMELOCK_DELAY (7 days).
-    ///      The first version of this test warped 7 days and passed, but only because 7 days
-    ///      exceeds 48 hours: it pinned nothing, and a regression moving this mechanism to a
-    ///      7-day lock would have gone undetected. Precisely the two-durations trap this
-    ///      file's own header warns about, made in the same file.
     function test_ExhaleFloor_ProposeAndExecuteApplies() public {
         _bootstrapAndStart();
         bulls.proposeExhaleFloorRelease(15000);
@@ -774,7 +964,6 @@ contract BreathEngineTest is SmartEarnBase {
         uint256 before = bulls.exhaleFloorReleaseBps();
         bulls.proposeExhaleFloorRelease(15000);
         bulls.cancelExhaleFloorRelease();
-
         vm.warp(block.timestamp + PRIZE_RATE_TIMELOCK + 1);
         vm.expectRevert(IBullsEthCRE.NoTimelockPending.selector);
         bulls.executeExhaleFloorRelease();
