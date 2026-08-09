@@ -347,7 +347,12 @@ contract AuditFindingsTest is BullsEthBase {
 
         // An ordinary player can no longer use it at all.
         vm.prank(players[0]);
-        vm.expectRevert();
+        // FULL PAYLOAD, not a bare selector. OwnableUnauthorizedAccount carries msg.sender,
+        // so its revert data is selector + 32 bytes and plain expectRevert(selector) --
+        // which is EXACT match -- could never satisfy it.
+        vm.expectRevert(
+            abi.encodeWithSelector(IBullsEthCRE.OwnableUnauthorizedAccount.selector, players[0])
+        );
         bulls.resolveWeek();
 
         // Nor can the owner, until RESOLVE_FALLBACK_DELAY has passed.

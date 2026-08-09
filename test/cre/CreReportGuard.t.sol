@@ -249,17 +249,39 @@ contract CreReportGuardTest is BullsEthBase {
         bulls.onReport(OUR_META, _pruneReport());
     }
 
-    function test_OnlyOwnerCanConfigure() public {
-        vm.startPrank(stranger);
-        vm.expectRevert();
+    /// @dev SPLIT FROM ONE TEST INTO FOUR, and typed. The original stacked FOUR bare
+    ///      vm.expectRevert() calls inside a single startPrank block. Two separate problems:
+    ///
+    ///      (1) A bare expectation is satisfied by ANY revert, so each of these would have
+    ///          passed even if the guard reverted for a completely unrelated reason.
+    ///      (2) vm.expectRevert applies to the very NEXT call and becomes unreliable when
+    ///          stacked after a caught revert, so the later pairs may not have been enforced
+    ///          at all. This is the same shape the keeper suite's own NatSpec warns about.
+    ///
+    ///      One setter per test, one expectation each, and vm.prank rather than startPrank so
+    ///      there is no block to get out of step with.
+    function test_OnlyOwnerCanSetTheForwarder() public {
+        vm.prank(stranger);
+        vm.expectRevert("Ownable: caller is not the owner");
         guard.setForwarder(stranger);
-        vm.expectRevert();
+    }
+
+    function test_OnlyOwnerCanSetTheTarget() public {
+        vm.prank(stranger);
+        vm.expectRevert("Ownable: caller is not the owner");
         guard.setTarget(stranger);
-        vm.expectRevert();
+    }
+
+    function test_OnlyOwnerCanAddARule() public {
+        vm.prank(stranger);
+        vm.expectRevert("Ownable: caller is not the owner");
         guard.addRule(0, 32, bytes32(0), "x");
-        vm.expectRevert();
+    }
+
+    function test_OnlyOwnerCanSetForwardWhileRecording() public {
+        vm.prank(stranger);
+        vm.expectRevert("Ownable: caller is not the owner");
         guard.setForwardWhileRecording(true);
-        vm.stopPrank();
     }
 
     function test_RenounceOwnershipIsDisabled() public {

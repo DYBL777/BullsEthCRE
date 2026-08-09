@@ -293,7 +293,7 @@ contract PregameTest is BullsEthBase {
 
         vm.warp(block.timestamp + OG_DECLINE_WINDOW + 1);
         vm.prank(og);
-        vm.expectRevert();
+        vm.expectRevert(IBullsEthCRE.DeclineWindowExpired.selector);
         bulls.cancelOGRegistration();
     }
 
@@ -301,7 +301,9 @@ contract PregameTest is BullsEthBase {
         address p = _newFundedPlayer(1);
         _commit(p, BASE_PREDICTION);
         vm.prank(p);
-        vm.expectRevert();
+        // NotInDeclineWindow, not DeclineWindowExpired: the expiry-zero check comes first
+        // for a caller who never opened a window at all.
+        vm.expectRevert(IBullsEthCRE.NotInDeclineWindow.selector);
         bulls.cancelOGRegistration();
     }
 
@@ -453,7 +455,9 @@ contract PregameTest is BullsEthBase {
 
     function test_StartGame_RevertsOnSecondCall() public {
         _bootstrapAndStart();
-        vm.expectRevert();
+        // GameNotActive, because the phase is already ACTIVE and the PREGAME check is the
+        // first line of startGame.
+        vm.expectRevert(IBullsEthCRE.GameNotActive.selector);
         bulls.startGame();
     }
 
@@ -494,7 +498,9 @@ contract PregameTest is BullsEthBase {
         vm.prank(p);
         bulls.claimSignupRefund();
         vm.prank(p);
-        vm.expectRevert();
+        // NothingToClaim, NOT AlreadyRefunded. The first claim zeroed totalPaid, and the
+        // `totalPaid == 0` check sits ABOVE the dormancyRefunded check, so it fires first.
+        vm.expectRevert(IBullsEthCRE.NothingToClaim.selector);
         bulls.claimSignupRefund();
     }
 
@@ -511,7 +517,8 @@ contract PregameTest is BullsEthBase {
 
     function test_SweepFailedPregame_RevertsBeforeTheWindowCloses() public {
         _commit(_newFundedPlayer(1), BASE_PREDICTION);
-        vm.expectRevert();
+        // TooEarly: neither the time gate nor the all-refunded gate is open.
+        vm.expectRevert(IBullsEthCRE.TooEarly.selector);
         bulls.sweepFailedPregame();
     }
 
