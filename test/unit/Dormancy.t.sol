@@ -460,4 +460,116 @@ contract DormancyTest is BullsEthBase {
         assertEq(usdc.balanceOf(ogA), afterClaim, "a paid claimant is unaffected by the sweep");
         assertGt(afterClaim, before, "and they were genuinely paid");
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  De-qualification: the one reachable path
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// @notice THE ONLY WAY A QUALIFICATION IS EVER TAKEN BACK. Three sites decrement
+    ///         qualifiedWeeklyOGCount. Two are structurally unreachable: consecutiveWeeks
+    ///         rises by at most one per distinct draw number, so qualification cannot land
+    ///         before draw 30, and the game closes at that same finalize -- leaving no
+    ///         window for a later status loss or streak break. See KNOWN_ISSUES.
+    ///
+    ///         This third site IS reachable, through a narrow endgame path: qualify at draw
+    ///         30, then have the operator wind the game down instead of resolving it. The
+    ///         qualifier claims a dormancy refund and their qualification is removed as part
+    ///         of the weekly-OG cleanup.
+    ///
+    /// @dev    Timing is tight but comfortable. Draw 30's cooldown is 72h. The OG buys
+    ///         inside the 48h pick window, dormancy is proposed immediately, the 24h
+    ///         timelock elapses, and activation becomes legal past the pick deadline at 48h
+    ///         -- all while the draw is still IDLE and the phase still ACTIVE.
+    ///
+    ///         NO UPFRONT OGs in this fixture, deliberately. That forces
+    ///         dormancyPrincipalFullCover true, so the casual pool sizes to exactly the
+    ///         weekly OG's own two-ticket net and covers it in full. The claim cannot revert
+    ///         on pool sizing, which keeps the test about de-qualification and nothing else.
+    function test_Claim_WeeklyOG_DequalifiesAQualifiedClaimant() public {
+        _bootstrapCommitted(MIN_PLAYERS_TO_START);
+
+        // Predictions sit at BASE + 3000, far outside t3CutoffDiff (99e6), so this OG never
+        // wins and actual winner counts match the submitted ones exactly.
+        address qualifier = _newFundedPlayer(73001);
+        vm.prank(qualifier); bulls.register();
+        vm.prank(qualifier);
+        bulls.registerAsWeeklyOG(BASE_PREDICTION + 3000, BASE_PREDICTION + 3001);
+
+        bulls.proposeStartGame();
+        vm.warp(block.timestamp + START_GAME_NOTICE_PERIOD + 1);
+        ethFeed.pushRound(ETH_PRICE);
+        bulls.startGame();
+
+        // Draw 1: registration already credited it (lastBoughtDraw = 1), so buying here
+        // would revert AlreadyBoughtThisWeek. Streak stands at 1.
+        _driveOneDraw(false, qualifier);
+
+        // Draws 2 through 29: they buy every one. Streak climbs 2 -> 29.
+        for (uint256 d = 2; d <= 29; d++) {
+            _driveOneDraw(true, qualifier);
+        }
+        assertEq(bulls.currentDraw(), 30, "at the final draw");
+        assertEq(bulls.qualifiedWeeklyOGCount(), 0, "not qualified after 29 perfect draws");
+
+        // Draw 30: the buy that crosses the threshold. Read hoisted out of the prank line.
+        uint256 twoTickets = bulls.MIN_TICKETS_WEEKLY_OG();
+        vm.prank(qualifier);
+        bulls.buyTickets(twoTickets);
+        assertEq(bulls.qualifiedWeeklyOGCount(), 1, "qualified on the final draw");
+
+        // The operator winds down instead of resolving draw 30.
+        bulls.proposeDormancy();
+        vm.warp(bulls.lastDrawTimestamp() + PICK_DEADLINE + 1);
+        bulls.activateDormancy();
+
+        // Preconditions, so a pass cannot be an accident of the count already being 0.
+        assertEq(bulls.qualifiedWeeklyOGCount(), 1, "still counted as qualified at activation");
+        (,,,,,,,, uint256 streak,,,,,) = bulls.getPlayerInfo(qualifier);
+        assertEq(streak, bulls.WEEKLY_OG_QUALIFICATION_WEEKS(), "and genuinely at the threshold");
+
+        vm.prank(qualifier);
+        bulls.claimDormancyRefund();
+
+        assertEq(
+            bulls.qualifiedWeeklyOGCount(),
+            0,
+            "the qualification was taken back when they claimed their dormancy refund"
+        );
+    }
+
+    /// @dev One full draw, resolved and finalised. `weeklyBuys` controls whether the named
+    ///      weekly OG takes their two-ticket minimum; the casuals always buy one via the
+    ///      base helper.
+    ///
+    ///      Local to the de-qualification test. Every other test in this file stops at draw
+    ///      1 and never needs a draw driven to completion.
+    ///
+    ///      No explicit submitPrediction calls: _bootstrapCommitted sets each player's
+    ///      prediction at payCommitment, and the H-01 standing-prediction rule carries it
+    ///      forward every draw. Re-submitting would be 500 redundant calls per draw.
+    ///
+    ///      Cutoffs are sized for a 502-entry snapshot (500 casuals + one weekly OG holding
+    ///      two entries), where 10/40/100 reads as 199/796/1992 bps -- inside T1 [50,400],
+    ///      T2 [400,1200] and T3 [1000,5000]. Casual predictions sit on the
+    ///      BASE_PREDICTION + i ladder so those counts are reachable.
+    ///
+    ///      The loop breaks on a bounce back to CUTOFF_SUBMISSION rather than calling
+    ///      completeDrawStep there, which reverts DrawNotProgressing.
+    function _driveOneDraw(bool weeklyBuys, address weeklyOg) internal {
+        if (weeklyBuys) {
+            uint256 twoTickets = bulls.MIN_TICKETS_WEEKLY_OG();
+            vm.prank(weeklyOg);
+            bulls.buyTickets(twoTickets);
+        }
+        _buyAllPlayers(1);
+        _warpToCooldownEnd();
+        _resolvePinned();
+        bulls.submitCutoffDiffs(9e6, 39e6, 99e6, 10, 40, 100);
+        for (uint256 i = 0; i < 20; i++) {
+            uint256 ph = uint256(bulls.drawPhase());
+            if (ph == uint256(IBullsEthCRE.DrawPhase.IDLE)) break;
+            if (ph == uint256(IBullsEthCRE.DrawPhase.CUTOFF_SUBMISSION)) break;
+            bulls.completeDrawStep();
+        }
+    }
 }
