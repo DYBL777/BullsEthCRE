@@ -205,10 +205,27 @@ contract InvariantsTest is SmartEarnBase {
     ///         That is the single most common way an invariant suite lies, and a log only
     ///         catches it if somebody reads the log. This makes CI catch it instead.
     function afterInvariant() public view {
+        console.log("-- progress --");
         console.log("draws completed :", handler.ghost_drawsCompleted());
         console.log("buys made       :", handler.ghost_buysMade());
+        console.log("resolves        :", handler.ghost_resolvesMade());
+        console.log("cutoffs taken   :", handler.ghost_cutoffsAccepted());
         console.log("prizes claimed  :", handler.ghost_claimsMade());
         console.log("final draw      :", bulls.currentDraw());
+
+        // WHY nothing happened, if nothing happened. The first campaign reported 12,800
+        // calls, zero reverts and zero effect, and the cause had to be guessed at. These
+        // turn the next stall into a diagnosis rather than a theory.
+        console.log("-- skipped because --");
+        console.log("wrong phase     :", handler.ghost_skipWrongPhase());
+        console.log("window shut     :", handler.ghost_skipWindowShut());
+        console.log("too few buyers  :", handler.ghost_skipTooFewBuyers());
+        console.log("cooldown        :", handler.ghost_skipCooldown());
+        console.log("-- swallowed reverts --");
+        console.log("buy             :", handler.ghost_failBuy());
+        console.log("resolve         :", handler.ghost_failResolve());
+        console.log("cutoffs         :", handler.ghost_failCutoffs());
+        console.log("step            :", handler.ghost_failStep());
 
         assertGt(
             handler.ghost_drawsCompleted(),

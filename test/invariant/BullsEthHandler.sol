@@ -12,59 +12,76 @@ import {MockAggregator} from "../mocks/MockAggregator.sol";
 ///         calls in legal orders, so the fuzzer spends its runs on the game's logic rather
 ///         than on bouncing off its phase guards.
 ///
-/// @dev    WHY A HANDLER AT ALL. Point Foundry straight at the contract and it generates
-///         random calls with random arguments: roughly everything reverts on WrongPhase,
-///         DrawInProgress or PicksLocked, and the campaign proves only that the guards
-///         guard. The handler is where the 423 unit tests get spent: they are how we know
-///         which call is legal in which phase, and this file is that knowledge written down
-///         as executable code.
+/// @dev    THE BUG THIS VERSION FIXES, because it is the interesting part.
 ///
-///         EVERY ACTION RETURNS SILENTLY RATHER THAN REVERTING when its preconditions are
-///         not met. A reverted handler call teaches the fuzzer nothing and, under
-///         fail_on_revert, aborts the campaign outright. Silence keeps the sequence moving.
+///         The first handler had a `warp` action that advanced 1 to 30 hours blindly, picked
+///         roughly one call in seven. Three or four of those before the first `buy` and the
+///         48-hour pick window had shut. From that moment the draw was UNRECOVERABLE: `buy`
+///         returns early because picks are locked, and `resolve` cannot fire because the
+///         contract refuses a draw with no entries. Draw 1 forever, 12,800 calls, zero buys.
 ///
-///         THE CUTOFF PROBLEM, and it is the one thing that shapes this file. The suite's
-///         standard draw submits fixed cutoffs (9e6/39e6/99e6, counts 10/40/100), which
-///         reconcile ONLY because every player buys exactly one ticket and predictions form
-///         the unique BASE_PREDICTION + i ladder. A fuzzer that varies WHO buys changes the
-///         entry count on every draw and those constants stop reconciling immediately.
+///         Two lessons, both worth keeping.
 ///
-///         So the cutoffs are computed from the actual buyer set instead. The ladder makes
-///         that exact rather than approximate: player i predicts BASE + i, so their entry
-///         sits at diff i * 1e6, and buyers are recorded in ascending index order. The k-th
-///         recorded buyer's index therefore IS the diff that admits exactly k entries. The
-///         counts are taken at 2% / 8% / 20%, comfortably inside T1 [0.5,4], T2 [4,12] and
-///         T3 [10,50] whatever the buyer count turns out to be.
+///         TIME IS AN ACTION AND NEEDS THE SAME CARE AS THE OTHERS. A handler action that
+///         moves the clock without regard to phase can close a window nothing reopens.
+///         `warp` below is now phase-aware: while a draw is open and under-bought it may
+///         only move WITHIN the window, and once there are enough buyers it jumps straight
+///         to the cooldown so settlement becomes reachable.
 ///
-///         SCOPE: LIVE SEASON ONLY. Buy, predict, resolve, submit, step, claim. No emergency
-///         reset and no dormancy. Those are where the interesting ordering bugs live, but a
-///         handler that cannot complete a clean season first will produce failures nobody
-///         can interpret. Second pass.
+///         AND SILENCE HID IT. Every action returns quietly when its preconditions fail,
+///         which is right, but it made "not applicable now" and "cannot ever work" look
+///         identical: 1,829 buy calls, zero reverts, zero buys. Every action now counts WHY
+///         it did nothing, so the next failure names its own cause instead of needing a
+///         theory.
+///
+///         THE CUTOFF DERIVATION. The suite's standard draw submits fixed cutoffs, which
+///         reconcile only because everyone buys one ticket on the BASE_PREDICTION + i
+///         ladder. A fuzzer that varies who buys breaks those constants immediately, so
+///         cutoffs are computed from the live buyer set: buyers are recorded in ascending
+///         index order, so the k-th recorded index IS the diff admitting exactly k entries.
+///         Buyers join the ladder AT THE MOMENT OF BUYING, because a buyer who never
+///         predicted settles on the auto-default, sits off the ladder, and makes the derived
+///         counts diverge from what matching produces.
+///
+///         SCOPE: LIVE SEASON ONLY. No emergency reset, no dormancy. Second pass.
 contract BullsEthHandler is Test {
-    BullsEth      public immutable bulls;
-    MockERC20     public immutable usdc;
+    BullsEth       public immutable bulls;
+    MockERC20      public immutable usdc;
     MockAggregator public immutable ethFeed;
 
-    uint256 internal constant TICKET_PRICE   = 10_000_000;
     uint256 internal constant BASE_PREDICTION = 300_000;
-    uint256 internal constant DRAW_COOLDOWN  = 72 hours;
-    uint256 internal constant PICK_DEADLINE  = 48 hours;
+    uint256 internal constant DRAW_COOLDOWN   = 72 hours;
+    uint256 internal constant PICK_DEADLINE   = 48 hours;
 
-    /// @dev Below this many buyers the count bands cannot all be satisfied at once, so the
-    ///      draw is left un-submitted rather than submitted with numbers that would bounce.
+    /// @dev Below this many buyers the three count bands cannot all be satisfied at once.
     uint256 internal constant MIN_BUYERS_TO_SETTLE = 60;
+    /// @dev Ceiling on one buy call, so a single handler action cannot exhaust the gas
+    ///      budget iterating the whole field.
+    uint256 internal constant MAX_BUYERS_PER_CALL  = 160;
 
     address[] public players;
 
-    /// @dev Buyer indices for the CURRENT draw, ascending. Ascending order is what makes the
-    ///      cutoff derivation exact, and it comes for free from iterating players in order.
     uint256[] internal _bought;
     uint256 internal _trackedDraw;
 
-    // ── ghosts, for the invariant file to read ────────────────────────────
+    // ── progress ghosts ──────────────────────────────────────────────────
     uint256 public ghost_drawsCompleted;
     uint256 public ghost_buysMade;
     uint256 public ghost_claimsMade;
+    uint256 public ghost_resolvesMade;
+    uint256 public ghost_cutoffsAccepted;
+
+    // ── diagnostic ghosts: WHY an action did nothing ─────────────────────
+    // Without these, a stuck campaign reports thousands of calls, zero reverts and zero
+    // effect, and the cause has to be guessed. These make the next failure self-describing.
+    uint256 public ghost_skipWrongPhase;
+    uint256 public ghost_skipWindowShut;
+    uint256 public ghost_skipTooFewBuyers;
+    uint256 public ghost_skipCooldown;
+    uint256 public ghost_failBuy;
+    uint256 public ghost_failResolve;
+    uint256 public ghost_failCutoffs;
+    uint256 public ghost_failStep;
 
     constructor(BullsEth bulls_, MockERC20 usdc_, MockAggregator feed_, address[] memory players_) {
         bulls   = bulls_;
@@ -90,44 +107,49 @@ contract BullsEthHandler is Test {
         (,,,,,,,,,,, b,,) = bulls.getPlayerInfo(p);
     }
 
+    function _pickDeadline() internal view returns (uint256) {
+        return bulls.lastDrawTimestamp() + PICK_DEADLINE;
+    }
+
+    function _cooldownEnd() internal view returns (uint256) {
+        return bulls.lastDrawTimestamp() + DRAW_COOLDOWN;
+    }
+
     // ── actions ───────────────────────────────────────────────────────────
 
-    /// @notice A pseudo-random slice of the field buys into the open draw. Callable more
-    ///         than once per draw: later calls top up the buyer set, which is what a real
-    ///         draw window looks like.
+    /// @notice A prefix of the field buys into the open draw. A PREFIX rather than a random
+    ///         subset, deliberately: the cutoff derivation needs buyer indices in ascending
+    ///         order, and iterating from zero gives that for free. Callable repeatedly to
+    ///         top the set up, which is what a real draw window looks like.
     function buy(uint256 seed) external {
         _syncDraw();
-        if (!_isActiveIdle()) return;
-        if (block.timestamp > bulls.lastDrawTimestamp() + PICK_DEADLINE) return;
+        if (!_isActiveIdle())                  { ghost_skipWrongPhase++;  return; }
+        if (block.timestamp > _pickDeadline()) { ghost_skipWindowShut++;  return; }
 
-        uint256 want = bound(seed, MIN_BUYERS_TO_SETTLE, players.length);
+        uint256 want = bound(seed, MIN_BUYERS_TO_SETTLE, MAX_BUYERS_PER_CALL);
+        if (want > players.length) want = players.length;
+
         for (uint256 i = 0; i < want; i++) {
             if (_boughtThisWeek(players[i])) continue;
             vm.prank(players[i]);
             try bulls.buyTickets(1) {
                 _bought.push(i);
                 ghost_buysMade++;
-                // ON THE LADDER AT THE MOMENT OF BUYING, not later and not optionally.
-                // The cutoff derivation below is exact only while every buyer's diff is
-                // index * 1e6. predict() is optional and prefix-only, so any buyer the
-                // fuzzer never reached settled on the global auto-default instead, sat off
-                // the ladder, and made the derived counts diverge from what matching
-                // actually produced. The draw then bounced until attempts exhausted.
-                // Proven by the first campaign run: 488 buys, zero completed draws.
+                // ON THE LADDER AT THE MOMENT OF BUYING. A buyer who never predicts settles
+                // on the global auto-default, sits off the ladder, and breaks the derivation.
                 vm.prank(players[i]);
                 try bulls.submitPrediction(BASE_PREDICTION + i) {} catch {}
-            } catch { /* cap, lapse or window: not this handler's business */ }
+            } catch { ghost_failBuy++; }
         }
     }
 
-    /// @notice Some buyers change their number mid-window. Kept ON the ladder: a player
-    ///         moving off it would break the diff derivation, and the point of this action
-    ///         is to exercise submitPrediction, not to scramble the fixture.
+    /// @notice Some buyers move their number. Kept ON the ladder: this action exists to
+    ///         exercise submitPrediction, not to scramble the fixture.
     function predict(uint256 seed) external {
         _syncDraw();
-        if (!_isActiveIdle()) return;
-        if (block.timestamp > bulls.lastDrawTimestamp() + PICK_DEADLINE) return;
-        if (_bought.length == 0) return;
+        if (!_isActiveIdle())                  { ghost_skipWrongPhase++;   return; }
+        if (block.timestamp > _pickDeadline()) { ghost_skipWindowShut++;   return; }
+        if (_bought.length == 0)               { ghost_skipTooFewBuyers++; return; }
 
         uint256 n = bound(seed, 1, _bought.length);
         for (uint256 k = 0; k < n; k++) {
@@ -137,46 +159,46 @@ contract BullsEthHandler is Test {
         }
     }
 
-    /// @notice Settle the draw once the cooldown has run. Publishes a feed round at the slot
-    ///         and pins to it, exactly as an honest off-chain caller would.
+    /// @notice Settle once the cooldown has run, pinning to a round published at the slot.
     function resolve() external {
         _syncDraw();
-        if (!_isActiveIdle()) return;
-        if (block.timestamp < bulls.lastDrawTimestamp() + DRAW_COOLDOWN) return;
-        if (_bought.length == 0) return; // an empty draw is refused by the contract anyway
+        if (!_isActiveIdle())                      { ghost_skipWrongPhase++;   return; }
+        if (block.timestamp < _cooldownEnd())      { ghost_skipCooldown++;     return; }
+        if (_bought.length < MIN_BUYERS_TO_SETTLE) { ghost_skipTooFewBuyers++; return; }
 
         uint80 rid = ethFeed.pushRound(ethFeed.latestAnswer());
-        try bulls.resolveWeek(rid) {} catch {}
+        try bulls.resolveWeek(rid) { ghost_resolvesMade++; } catch { ghost_failResolve++; }
     }
 
-    /// @notice Cutoffs derived from the live buyer set. See the header: the ladder makes the
-    ///         k-th buyer's index the exact diff that admits k entries, so the submitted
-    ///         counts and the counts matching produces are the same number by construction
-    ///         rather than by tuning.
+    /// @notice Cutoffs derived from the live buyer set. The ladder makes the k-th buyer's
+    ///         index the exact diff admitting k entries, so submitted counts and matched
+    ///         counts agree by construction rather than by tuning.
     function submitCutoffs() external {
         _syncDraw();
-        if (bulls.drawPhase() != IBullsEthCRE.DrawPhase.CUTOFF_SUBMISSION) return;
+        if (bulls.drawPhase() != IBullsEthCRE.DrawPhase.CUTOFF_SUBMISSION) {
+            ghost_skipWrongPhase++; return;
+        }
 
         uint256 n = _bought.length;
-        if (n < MIN_BUYERS_TO_SETTLE) return;
+        if (n < MIN_BUYERS_TO_SETTLE) { ghost_skipTooFewBuyers++; return; }
 
         uint256 c1 = n * 200 / 10000; if (c1 == 0) c1 = 1;   // 2%,  band [0.5, 4]
         uint256 c2 = n * 800 / 10000;                        // 8%,  band [4, 12]
         uint256 c3 = n * 2000 / 10000;                       // 20%, band [10, 50]
-        if (c1 > c2 || c2 > c3 || c3 > n) return;
+        if (c1 > c2 || c2 > c3 || c3 > n) { ghost_skipTooFewBuyers++; return; }
 
-        uint256 d1 = _bought[c1 - 1] * 1e6;
-        uint256 d2 = _bought[c2 - 1] * 1e6;
-        uint256 d3 = _bought[c3 - 1] * 1e6;
-
-        try bulls.submitCutoffDiffs(d1, d2, d3, c1, c2, c3) {} catch {}
+        try bulls.submitCutoffDiffs(
+            _bought[c1 - 1] * 1e6,
+            _bought[c2 - 1] * 1e6,
+            _bought[c3 - 1] * 1e6,
+            c1, c2, c3
+        ) { ghost_cutoffsAccepted++; } catch { ghost_failCutoffs++; }
     }
 
-    /// @notice Drive whichever step is due. Permissionless in the contract, so the fuzzer
-    ///         drives it as itself rather than as the owner.
+    /// @notice Drive whichever step is due. Permissionless in the contract.
     function step() external {
         uint256 before = bulls.currentDraw();
-        try bulls.completeDrawStep() {} catch { return; }
+        try bulls.completeDrawStep() {} catch { ghost_failStep++; return; }
         if (bulls.currentDraw() > before) { ghost_drawsCompleted++; _syncDraw(); }
     }
 
@@ -189,13 +211,45 @@ contract BullsEthHandler is Test {
         try bulls.claimPrize() { ghost_claimsMade++; } catch {}
     }
 
-    /// @notice Time passes. Bounded so a single jump cannot skip an entire draw window,
-    ///         which would starve every other action.
+    /// @notice TIME, AND THIS IS THE ACTION THAT BROKE THE FIRST CAMPAIGN.
+    ///
+    /// @dev    A blind clock advance can close the pick window while a draw is still
+    ///         under-bought, and nothing reopens it: buying is locked and the contract
+    ///         refuses to settle a draw with no entries. The season stalls at draw 1 and
+    ///         every invariant passes trivially forever.
+    ///
+    ///         So time is phase-aware. Under-bought and open: move only WITHIN the window,
+    ///         never past it. Enough buyers: jump straight to the cooldown so settlement
+    ///         becomes reachable. Mid-draw: a small step, since those phases advance on
+    ///         calls rather than on the clock.
+    ///
+    ///         This constrains the fuzzer, which is a real cost and worth stating plainly:
+    ///         the campaign no longer explores "what if everyone stops buying". That belongs
+    ///         in a separate campaign with its own invariants, not smuggled in as a deadlock
+    ///         that silently disables every property at once.
     function warp(uint256 seed) external {
-        vm.warp(block.timestamp + bound(seed, 1 hours, 30 hours));
+        _syncDraw();
+
+        if (_isActiveIdle()) {
+            uint256 deadline = _pickDeadline();
+
+            if (_bought.length < MIN_BUYERS_TO_SETTLE) {
+                // The window must stay open or this draw can never settle.
+                if (block.timestamp + 1 >= deadline) { ghost_skipWindowShut++; return; }
+                uint256 room = deadline - block.timestamp - 1;
+                vm.warp(block.timestamp + bound(seed, 1, room));
+                return;
+            }
+
+            // Enough buyers: make settlement reachable rather than drifting toward it.
+            uint256 slot = _cooldownEnd();
+            if (block.timestamp < slot) { vm.warp(slot); return; }
+        }
+
+        vm.warp(block.timestamp + bound(seed, 1 hours, 6 hours));
     }
 
-    // ── views for the invariant file ──────────────────────────────────────
+    // ── views ─────────────────────────────────────────────────────────────
 
     function playerCount() external view returns (uint256) { return players.length; }
     function buyersThisDraw() external view returns (uint256) { return _bought.length; }
