@@ -4,7 +4,7 @@ pragma solidity 0.8.24;
 import {SmartEarnBase} from "../base/SmartEarnBase.t.sol";
 import {BullsEth} from "../../src/BullsEthCRE.sol";
 import {IBullsEthCRE} from "../../src/IBullsEthCRE.sol";
-import {MockAggregatorWithBounds} from "../mocks/MockAggregatorWithBounds.sol";
+import {MockAggregatorWithBounds} from "./MockAggregatorWithBounds.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 import {stdStorage, StdStorage} from "forge-std/Test.sol";
 
