@@ -17,3 +17,8 @@ runs = 2000
 
 [fmt]
 line_length = 120
+
+[invariant]
+runs = 32
+depth = 400
+fail_on_revert = false
