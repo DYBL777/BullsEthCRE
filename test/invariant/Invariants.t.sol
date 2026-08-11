@@ -185,21 +185,35 @@ contract InvariantsTest is SmartEarnBase {
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    //  Campaign visibility
+    //  Campaign visibility, asserted rather than printed
     // ══════════════════════════════════════════════════════════════════════
 
-    /// @notice NOT AN INVARIANT, a report. Prints what the campaign actually managed to do,
-    ///         because an invariant suite that never got past draw 1 passes everything above
-    ///         while proving nothing at all. A run showing zero completed draws means the
-    ///         handler is stuck, not that the contract is sound.
+    /// @notice RUNS ONCE AT THE END OF EACH SEQUENCE, and that timing is the whole point.
     ///
-    /// @dev    The single most common way an invariant campaign lies to you, and the reason
-    ///         this is here rather than left to be noticed later.
-    function invariant_CallSummary() public view {
+    /// @dev    This replaces an invariant_CallSummary that logged the same figures. It was
+    ///         wrong, and wrong in a way worth recording. invariant_ functions are checked
+    ///         after EVERY call INCLUDING THE FIRST, when the fuzzer has done nothing yet.
+    ///         A summary logged there reports draw 1, zero buys, zero draws -- whether or
+    ///         not the campaign was actually empty. The printout looked like a stuck handler
+    ///         on a campaign that was completing draws perfectly well.
+    ///
+    ///         afterInvariant runs once per sequence, after the calls, so the numbers are
+    ///         the campaign's real output.
+    ///
+    ///         AND IT ASSERTS RATHER THAN PRINTS. A campaign that never completes a draw
+    ///         satisfies every property above trivially: nothing happened, so nothing broke.
+    ///         That is the single most common way an invariant suite lies, and a log only
+    ///         catches it if somebody reads the log. This makes CI catch it instead.
+    function afterInvariant() public view {
         console.log("draws completed :", handler.ghost_drawsCompleted());
         console.log("buys made       :", handler.ghost_buysMade());
         console.log("prizes claimed  :", handler.ghost_claimsMade());
-        console.log("current draw    :", bulls.currentDraw());
-        console.log("draw phase      :", uint256(bulls.drawPhase()));
+        console.log("final draw      :", bulls.currentDraw());
+
+        assertGt(
+            handler.ghost_drawsCompleted(),
+            0,
+            "campaign completed no draws: every invariant above proved nothing"
+        );
     }
 }
