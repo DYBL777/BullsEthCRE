@@ -53,14 +53,20 @@ contract InvariantsTest is SmartEarnBase {
         // calls that bounce off phase guards and prove nothing.
         targetContract(address(handler));
 
-        bytes4[] memory selectors = new bytes4[](7);
-        selectors[0] = handler.buy.selector;
-        selectors[1] = handler.predict.selector;
-        selectors[2] = handler.resolve.selector;
-        selectors[3] = handler.submitCutoffs.selector;
-        selectors[4] = handler.step.selector;
-        selectors[5] = handler.claim.selector;
-        selectors[6] = handler.warp.selector;
+        bytes4[] memory selectors = new bytes4[](12);
+        selectors[0]  = handler.buy.selector;
+        selectors[1]  = handler.predict.selector;
+        selectors[2]  = handler.resolve.selector;
+        selectors[3]  = handler.submitCutoffs.selector;
+        selectors[4]  = handler.step.selector;
+        selectors[5]  = handler.claim.selector;
+        selectors[6]  = handler.warp.selector;
+        // Pass two: the destructive paths and the claims they unlock.
+        selectors[7]  = handler.sabotageCutoffs.selector;
+        selectors[8]  = handler.reset.selector;
+        selectors[9]  = handler.dormancy.selector;
+        selectors[10] = handler.claimRefund.selector;
+        selectors[11] = handler.sweep.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
@@ -164,6 +170,57 @@ contract InvariantsTest is SmartEarnBase {
         );
     }
 
+    /// @notice THE CONTRACT'S OWN IDENTITY, asserted for the first time. activateDormancy's
+    ///         NatSpec states that draws played plus reset draws equals currentDraw - 1, and
+    ///         sizes every OG's pro-rata refund on it. Nothing checked it.
+    ///
+    /// @dev    It could not be checked before pass two, for a reason worth recording:
+    ///         drawsPlayed is NOT a state variable. There is no increment site. It is derived
+    ///         at dormancy as (currentDraw - 1) - resetDrawCount, so asserting the identity
+    ///         against the contract's own figures is circular.
+    ///
+    ///         The ghosts break the circle. The handler counts clean finalisations and
+    ///         reset-driven advances separately, by reading resetDrawCount either side of
+    ///         each step. Pass one conflated them -- any currentDraw advance counted as a
+    ///         completed draw -- which is exactly why this invariant is new here rather than
+    ///         written earlier.
+    function invariant_EveryDrawNumberIsEitherPlayedOrVoided() public view {
+        assertEq(
+            handler.ghost_drawsCompleted() + handler.ghost_resetsCompleted(),
+            bulls.currentDraw() - 1,
+            "a draw number was consumed without being either played or voided"
+        );
+    }
+
+    /// @notice DORMANCY SENIORITY. No junior tier may be funded while a senior tier is short.
+    ///         VC seed is senior to OG principal, which is senior to casual refunds, which is
+    ///         senior to the commitment pool. That ordering is a promise made to an investor
+    ///         and to committed players, and it is the reason the waterfall exists at all.
+    ///
+    /// @dev    VACUITY GUARD, and the dormancy register's own lesson applied to itself. On a
+    ///         contract that has never gone dormant every pool is zero and the implication
+    ///         holds trivially, so the property would read as coverage while proving nothing.
+    ///         The early return makes it explicit that this asserts only where there is
+    ///         something to assert about.
+    function invariant_SeniorTiersAreFundedBeforeJuniorOnes() public view {
+        if (bulls.gamePhase() != IBullsEthCRE.GamePhase.DORMANT) return;
+
+        // Full cover is the contract's own flag for "this tier was satisfied in full".
+        // A junior pool holding money while a senior one was short is the violation.
+        if (!bulls.dormancyPrincipalFullCover()) {
+            assertEq(
+                bulls.dormancyCasualRefundPool(),
+                0,
+                "casual pool funded while OG principal was short"
+            );
+            assertEq(
+                bulls.dormancyCommitmentPool(),
+                0,
+                "commitment pool funded while OG principal was short"
+            );
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     //  Season boundaries
     // ══════════════════════════════════════════════════════════════════════
@@ -210,7 +267,12 @@ contract InvariantsTest is SmartEarnBase {
         console.log("buys made       :", handler.ghost_buysMade());
         console.log("resolves        :", handler.ghost_resolvesMade());
         console.log("cutoffs taken   :", handler.ghost_cutoffsAccepted());
+        console.log("draws voided    :", handler.ghost_resetsCompleted());
+        console.log("resets fired    :", handler.ghost_resetsTriggered());
+        console.log("sabotages taken :", handler.ghost_sabotages());
+        console.log("dormancies      :", handler.ghost_dormancyActivated());
         console.log("prizes claimed  :", handler.ghost_claimsMade());
+        console.log("refunds claimed :", handler.ghost_refundClaims());
         console.log("final draw      :", bulls.currentDraw());
 
         // WHY nothing happened, if nothing happened. The first campaign reported 12,800
@@ -221,16 +283,32 @@ contract InvariantsTest is SmartEarnBase {
         console.log("window shut     :", handler.ghost_skipWindowShut());
         console.log("too few buyers  :", handler.ghost_skipTooFewBuyers());
         console.log("cooldown        :", handler.ghost_skipCooldown());
+        console.log("dice            :", handler.ghost_skipDice());
         console.log("-- swallowed reverts --");
         console.log("buy             :", handler.ghost_failBuy());
         console.log("resolve         :", handler.ghost_failResolve());
         console.log("cutoffs         :", handler.ghost_failCutoffs());
         console.log("step            :", handler.ghost_failStep());
+        console.log("reset           :", handler.ghost_failReset());
+        console.log("dormancy        :", handler.ghost_failDormancy());
 
-        assertGt(
-            handler.ghost_drawsCompleted(),
-            0,
-            "campaign completed no draws: every invariant above proved nothing"
+        // THE ASSERT WIDENS IN PASS TWO, and it has to. "Completed a draw" was the right
+        // bar for a live-season handler, where nothing else could happen. It is now WRONG:
+        // a sequence that strands its pick window and goes dormant, or that voids its only
+        // draws by reset, has explored exactly the paths this pass adds. Holding the old
+        // bar would fail the stall-then-dormancy sequence BY DESIGN, which is the one most
+        // worth reaching.
+        //
+        // The bar is instead "something irreversible happened". A campaign that neither
+        // played a draw nor voided one nor wound the game down did nothing at all, and every
+        // property above passed trivially.
+        bool didSomething = handler.ghost_drawsCompleted() > 0
+            || handler.ghost_resetsCompleted() > 0
+            || handler.ghost_dormancyActivated() > 0;
+
+        assertTrue(
+            didSomething,
+            "campaign was inert: no draw played, none voided, no wind-down"
         );
     }
 }
