@@ -1,175 +1,134 @@
-# BullsEthCRE — testing backlog (v2, after full contract sweep)
+# BullsEthCRE, testing backlog
 
-Supersedes v1. Produced by enumerating every external/public function and view in
-BullsEthCRE.sol v1.17 and checking each against the 18 suites.
+What is not yet covered, in priority order. Current suite: 432 tests across 24 suites, all
+passing. Zero contract bugs found to date; every finding across roughly a dozen audit rounds
+has been in the tests.
 
-**Current: 375 tests, 18 suites, zero contract bugs found to date.** Every finding across a
-dozen audit rounds has been in the tests.
-
-**Coverage of state-changing functions is good.** 74 external/public functions; all but a
-handful have at least their guards tested. The gaps cluster in three places: **what winners
-are actually paid**, **the sweep and refund tails**, and **view functions**, which have
-almost no coverage at all.
-
-Roughly **69 tests** to close everything, then fuzzing.
+Rough remaining total: 30 to 35 tests, plus 11 one-line edits that add no tests.
 
 ---
 
-## Priority 1 — prize distribution mechanics (~13)
+## 1. View functions (~14). The largest remaining gap.
 
-Unchanged from v1 and still the top item: the only area where a bug means someone is paid the
-wrong amount. `DrawMachinery` covers winner COUNTS and value conservation. Nothing covers
-what a winner RECEIVES.
+23 views exist and roughly 12 have no test at all. Views are what frontends and keepers read,
+so a wrong view is a wrong decision downstream with nothing reverting to stop it. Nothing else
+on this list has that property.
 
-- **Tier ordering (~3).** Nothing asserts T1 pays more than T2 pays more than T3. That is the
-  headline structure (40% / 35.56% / remainder of distributable). Transpose the tier indices
-  and no test fails.
-- **Dust (~3).** `pool - (perWinner * winners.length)` returns to `prizePot`, `tierPools[i]`
-  drops by the same. Use a prime winner count so the remainder is real.
-- **The two skip paths (~3).** `perWinner == 0` and `winners.length == 0` both return the
-  whole pool and emit `TierSkippedDust`. The empty-tier branch is documented as "should not
-  occur", which is exactly the claim that earns a test.
-- **Batched resumption (~2).** `MAX_DISTRIBUTE_PER_TX` is 200. Past that the loop resumes on
-  `distTierIndex` / `distWinnerIndex`. Untested resumption is how half a tier gets paid twice.
-- **Boundary ties (~2).** `diff <= t1CutoffDiff`, so entries landing EXACTLY on a cutoff all
-  enter that tier. Stated in the contract, untested, and it is the mechanism that can push
-  actual counts past `T1_COUNT_MAX_BPS` and bounce a draw. (The mass-identical-prediction case
-  IS covered, in AuditFindings H-01. This is the narrower boundary case.)
+- `getRequiredCutoffDiffBounds` is the highest value of the group, being keeper-facing, and it
+  carries the CRE v0.14 ceiling-division fix that stops keepers being guided into submissions
+  that revert.
+- `getAutoDefault` feeds keeper auto-pick logic.
+- `getOGCapInfo`, worth testing under both registration orderings given the cap ordering quirk
+  recorded in KNOWN_ISSUES C3.
+- `getProjectedEndgamePerOG`, what an OG sees as their expected return all season.
+- `getExhaleFloorHealth`, the gate flag and the health reading.
+- `getSeedReleaseStatus`, investor-facing.
+- `isResultStale`, whose draw-0 guard and in-flight early return are both deliberate and
+  neither is tested.
+- `getPreGameStats`, where `readyToStart` means canPropose and not canExecuteStart, which is
+  an easy thing to get wrong downstream.
+- `getCutoffState`, `isValidPrediction`, `getOGListIndex`, `getGameState`, `getDormancyInfo`,
+  all cheap.
+- `countStaleOGs(start, count)`, the paginated overload. The unpaginated one is used; this one
+  is not.
 
----
+## 2. Sweep and refund tails (~6)
 
-## Priority 2 — view functions (~14) [NEW, and larger than expected]
-
-**23 views exist. Roughly 12 have no test at all.** Views are what frontends and keepers read,
-so a wrong view is a wrong decision by everything downstream, silently.
-
-- **`getRequiredCutoffDiffBounds`** — keeper-facing, and carries the CRE v0.14 ceiling-division
-  fix that stops keepers being guided into reverting submissions. Highest value of the group.
-- **`getAutoDefault`** — feeds keeper auto-pick logic; returns the seed vs live flag.
-- **`getOGCapInfo`** — registration-facing. Given the cap ordering quirk now pinned in
-  WeeklyOgLifecycle, worth confirming what this reports under both orderings.
-- **`getProjectedEndgamePerOG`** — what an OG sees as their expected return all season.
-- **`getExhaleFloorHealth`** — the `gateActive` flag and `potHealthBps`.
-- **`getSeedReleaseStatus`** — investor-facing.
-- **`isResultStale`** — the draw-0 guard and the in-flight-phase early return are both
-  documented as deliberate; neither is tested.
-- **`getPreGameStats`** — `readyToStart` is documented as canPropose, NOT canExecuteStart. An
-  easy thing to get wrong downstream.
-- **`getCutoffState`**, **`isValidPrediction`**, **`getOGListIndex`**, **`getGameState`** —
-  cheap.
-- **`countStaleOGs(start, count)`** — the paginated overload. The unpaginated one is used;
-  this one is not.
-
----
-
-## Priority 3 — the draw-30 bonus fund (~5)
-
-3% of every weekly pool siphoned across draws 1-29, consumed at draw 30, returned to the pot
-if dormancy arrives first. Exercised incidentally, asserted nowhere.
-
-- accumulation at `DRAW30_BONUS_BPS`
-- consumption into the draw-30 pool
-- `Draw30BonusReturned` on dormancy before draw 30
-- reset rollback (`currentDrawBonusContribution` reversed, no double-accumulation on replay)
-- the defensive zero at draw 30 stopping a reset double-deducting
-- (`getDraw30BonusStatus` view folds in here)
-
----
-
-## Priority 4 — sweeps and refund tails (~17)
-
-All visible as absences in the CI log.
-
-- **`claimCommitmentRefund` (~4).** The draw-1 reset path. EmergencyReset has three
-  `ResetRefund` tests and none for the commitment pool.
-- **`sweepResetRefundRemainder` (~4).** Both reset pools and the commitment pool, including
-  the DORMANT/CLOSED branch that pays the beneficiary rather than returning to the pot.
-- **`sweepFailedPregame` happy path (~3).** Only the two revert tests exist. The VC seed
-  return (CRE v0.6 MEDIUM-01) and the treasury reconciliation (B-L-01) are both untested.
-- **`sweepUnclaimedPrizes` / `sweepUnclaimedEndgame` after the 180-day window (~3).** Only the
+- `sweepFailedPregame` happy path, including the VC seed return and the treasury
+  reconciliation. Only the two revert cases exist.
+- `sweepUnclaimedPrizes` and `sweepUnclaimedEndgame` after the 180-day window. Only the
   "reverts before" side is covered.
-- **`batchRefundPlayers` partial coverage (~3).** Three tests exist; the branch where a refund
-  is capped at `prizePot + treasuryBalance` is not one of them.
+- `batchRefundPlayers` where a refund is capped at prize pot plus treasury balance.
+
+## 3. Untested revert branches (5)
+
+Each of these errors exists in the contract and is named by no test.
+
+- `InvalidPrediction`, the zero and above-maximum bounds.
+- `SeedNotDeposited`, `startGame` with a seed configured and `seedPot` never called.
+- `MaxPlayersReached`, the registration cap.
+- `InsufficientGasForBatch`, the batch loops refusing to start an iteration under 150k gas.
+- `GameAlreadyClosed` at the resolve-side season boundary, where `currentDraw` exceeds
+  `TOTAL_DRAWS`. Distinct from the `gameSettled` sites, which are covered.
+
+## 4. Behavioural gaps (~6)
+
+- **Prize-rate multiplier effect on payouts.** The governance around `prizeRateMultiplier` is
+  fully tested. Nothing asserts that a reduced multiplier reduces what a winner is actually
+  paid, so the multiplier could be a no-op in distribution and every existing test would still
+  pass.
+- **Resolution-time fallback ladder consumption.** `startGame`'s feed substitution is covered.
+  The resolve-side ladder is not: `ReserveFeedUsed`, `FeedStaleFallback`, and a resolution
+  actually settling on `autoDefaultCents`. This is the part that pays players.
+- **Partial-claim cap in `claimCommitmentRefund`**, with its `CommitmentRefundPartial` event.
+- **`resetDrawRefundPool2`**, the second-reset overflow slot. Needs a two-reset fixture, which
+  nobody has built.
+- **Empty-tier skip**, the `winners.length == 0` path. Documented in the contract as "should
+  not occur", which is exactly the claim that earns a test. May be unreachable through honest
+  cutoffs given the band minimums, in which case the outcome is a KNOWN_ISSUES unreachability
+  note rather than a test.
+- **Streak de-qualification decrement.** See KNOWN_ISSUES C4: two of the three
+  `qualifiedWeeklyOGCount` decrements are unreachable while the qualification threshold equals
+  the season length. Already analysed and recorded there; listed here so the analysis is not
+  mistaken for a coverage gap.
+
+## 5. Typed expectation debt (11 one-line edits, no new tests)
+
+Nine `vm.expectRevert()` calls in the suite name no error, so each would pass on any revert
+rather than the intended one. Sites: Pregame 296, 304, 456, 497, 514; AuditFindings 350; and
+CreReportGuard's `test_OnlyOwnerCanConfigure`, which stacks four bare expectations under a
+single `startPrank`. All the underlying errors take no arguments, so typing them is
+mechanical.
+
+One further bare expectation is deliberate and should stay: the codeless-address test in
+GovernanceTimelocks, where the raw empty revert is the behaviour being pinned (KNOWN_ISSUES
+C1).
+
+## 6. Operator telemetry events (2)
+
+The suite asserts state rather than events, which is a defensible style and not worth
+reversing wholesale. Two exceptions are worth making, because they are events an operator's
+monitoring would alert on and no state assertion substitutes:
+
+- `SolverDistressSignal`, on the proven insolvency fixture.
+- `CutoffAttemptsExhausted`, at exhaustion.
+
+## 7. Constructor completeness (~2)
+
+The deploy suite is five tests against a constructor with considerably more validation than
+that: the per-address `InvalidAddress` set, the feed decimals check, and the M-02 seed-cap
+ceiling of 6349, which deserves the both-sides boundary treatment the governance suite gave
+the governance-side cap (6350 reverts, 6349 deploys).
 
 ---
 
-## Priority 5 — newly found smaller gaps (~12) [NEW]
+## Closed since the previous version of this file
 
-- **`seedPot` (~4).** Only the `onlyOwner` revert is tested. Untested: `PotAlreadySeeded` on a
-  second call, `BelowMinimum` when `VC_SEED == 0`, the `potSeeded` flag, and the `prizePot`
-  increment. The seeding happens inside `_bootstrapAndStart` so it demonstrably works, but
-  nothing asserts it.
-- **`cancelPrizeRateIncrease` (~2).** `cancelPrizeRateReduction` is tested; the increase
-  variant is not. Separate functions with mirrored guards
-  (`pendingMultiplier <= prizeRateMultiplier` vs `>=`).
-- **`applyAutoPicksForDraw` happy path (~2).** Keeper covers every guard. Nothing proves it
-  actually applies a prediction.
-- **`startGame` feed substitution (~1).** If the primary feed returns 0 and the reserve is
-  live, `startGame` repoints `ethFeed` and emits `FeedSubstituted`. Pregame tests the
-  stale-feed REVERT but not the successful substitution.
-- **`claimForceDeclineRefund` (~1).** Deprecated with the intent queue;
-  `forceDeclineRefundOwed` is always 0, so it always reverts `NothingToClaim`. One test pins
-  it inert, worth having precisely because it looks live.
-- **`_captureYield` / `YieldCaptured` (~2).** Send USDC directly to the contract and the
-  surplus is absorbed into `prizePot`. Untested donation path.
+Listed because the previous version named several of these as the top priorities.
 
----
+**Prize distribution mechanics (11 tests).** Was the largest gap and the only remaining area
+where a bug meant someone was paid the wrong amount. Now covers tier ordering, equal payment
+within a tier, dust return with exact conservation, both skip paths, batched resumption past
+the 200-per-transaction cap with the parked indices asserted exactly, and boundary ties at
+both cutoffs.
 
-## Priority 6 — small owed items (~8)
+**Invariant fuzzing (9 properties).** Was listed as deliberately last. Now running on every CI
+push, 32 sequences of 400 calls per property. Covers clean seasons, emergency resets that void
+a draw, dormancy wind-downs with waterfall refunds, and cutoff sabotage with recovery. The
+campaign asserts its own progress, so a run that completes no draws fails CI rather than
+passing quietly.
 
-Carried forward.
+**The draw-30 bonus fund (7 tests).** Accumulation at the stated rate, consumption into the
+final draw, the dormancy return, and the reset rollback.
 
-- `setDefaultPrediction` bounds and phase gates
-- `checkSolvency` insolvent direction (only solvent is covered)
-- fallback-feed rejection on a deployment that configures fallbacks (see GovernanceTimelocks,
-  where the vacuity guard fired and the test was removed)
-- `getCurrentPrizeRate` composition
-- `BreathRailReleased` event emission
-- solver resumption after the override lock expires
-- DORM-GATE precedence over the draw-1 breath clamp (the IC-03 note says the clamp stays until
-  this test exists)
-- `SolvencyAlert` emission from the three inline checks (claimEndgame, claimDormancyRefund,
-  claimPrize)
+**Reset refunds (11 tests).** `claimCommitmentRefund` and `sweepResetRefundRemainder`,
+including the destination flip that sends the remainder back to the pot while the game is
+active but to the beneficiary once it is dormant or closed.
 
----
+**Feed guards and the circuit breaker (8 tests).** Required a bounds-aware mock, and executed
+the Chainlink min and max answer comparisons for the first time in the project's history. Also
+covers all three sequencer arms and the insolvent-launch refusal.
 
-## Priority 7 — invariant fuzzing (LAST, deliberately)
-
-Random legal call sequences, properties checked after every call. Goes last because the
-handler must drive calls in legal orders, and the tests above are how that knowledge was
-acquired.
-
-- contract USDC balance covers every allocated pool (the SYNC list, five places)
-- `seedReleased <= VC_SEED`
-- `seedReleased <= cumulativeSeasonTreasury * MAX_SEED_RELEASE_RATIO_BPS / 10000`
-- `qualifiedWeeklyOGCount <= weeklyOGCount`
-- `drawsPlayed + resetDrawCount == currentDraw - 1` (stated as an invariant in the
-  activateDormancy NatSpec, never actually asserted)
-- pot plus tier pools conserved across a draw
-- treasury locked whenever `prizePot < requiredEndPot` and not settled
-- `upfrontOGCount + weeklyOGCount` never exceeds `ogList.length`
-
-**The handler is the work.** Unconstrained, ~95% of generated calls bounce off `WrongPhase`
-and the fuzzer tests the guards rather than the logic.
-
----
-
-## What is genuinely well covered
-
-Recorded so the list above is not mistaken for the whole picture:
-
-pregame registration and refunds (43), the breath engine (51), governance timelocks (41),
-keeper and automation (41), draw machinery (30), dormancy (30), emergency reset and unwind
-(22), claims and endgame (22), the CRE seam and report guard (25), SmartEarn dormancy and the
-H-02 invariant (18), the weekly OG lifecycle (15), deploy (5), and one full-cycle integration.
-
----
-
-## Housekeeping (not tests)
-
-- **`test/unit/BreathEngine.t (4).sol`** still carries the download-rename artefact. Rename
-  before Cyfrin sees the repo.
-- **Unused variable** at `AuditFindings.t.sol:118` (`keeperCountsForThisOG = 2`). Open it
-  rather than delete it: an unused variable in a test sometimes marks an assertion that was
-  intended and never written.
-- **Two `uint256(resolvedPrice)` casts** need lint annotations. See KNOWN_ISSUES addendum 2.
+**Seed and solvency (7 tests).** The `seedPot` cluster, plus `SolvencyCheckFailed` proven able
+to fire and its healthy-path control, which were the prerequisites for trusting the balance
+invariant under fuzzing.
