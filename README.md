@@ -1,5 +1,12 @@
 # BullsEthCRE
 
+> **Archived.** A proof of concept, frozen at v1.17. It is too large to deploy (70,811 bytes
+> against the 24,576-byte limit), so the games built after it were designed to fit.
+> Its sizing solver, BreathEngine, holds a floor to a deadline. One limit to know: the floor
+> holds only if income arrives at or above the forecast it is given. If income falls short,
+> the last payment can land below the floor; passing a zero or reduced forecast gives a hard
+> floor at the cost of smaller early payouts.
+
 [![tests](https://github.com/DYBL777/BullsEthCRE/actions/workflows/tests.yml/badge.svg)](https://github.com/DYBL777/BullsEthCRE/actions/workflows/tests.yml)
 
 A 30-draw ETH/USD prediction game on Base Mainnet, settled in USDC, built on Chainlink (Data
